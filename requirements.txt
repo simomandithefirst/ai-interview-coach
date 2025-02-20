@@ -1,0 +1,9 @@
+streamlit
+openai
+requests
+beautifulsoup4
+PyPDF2
+python-dotenv
+fpdf
+markdown
+Pillow
