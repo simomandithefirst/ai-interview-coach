@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 import PyPDF2
 from dotenv import load_dotenv
 import io
-import markdown as md  # use alias 'md' for clarity
+import markdown as md  # using alias 'md'
 from openai import OpenAI
 
 # -------------------------------
@@ -102,6 +102,22 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
 # -------------------------------
+# Authentication
+# -------------------------------
+if not st.session_state.get("logged_in"):
+    st.title("Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        if username in app_users and password == app_users[username]:
+            st.session_state.logged_in = True
+            st.success("Logged in successfully!")
+            st.rerun()
+        else:
+            st.error("Invalid username or password.")
+    st.stop()
+
+# -------------------------------
 # Navigation Functions
 # -------------------------------
 def go_to_module(new_module: int):
@@ -124,7 +140,7 @@ def reset_state():
 # Utility Functions
 # -------------------------------
 def render_card(content: str):
-    # Convert the markdown to HTML first
+    # Convert markdown to HTML using the markdown library
     html_content = md.markdown(content)
     st.markdown(f"<div class='card'>{html_content}</div>", unsafe_allow_html=True)
 
