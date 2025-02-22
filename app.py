@@ -93,13 +93,40 @@ st.markdown(
 # Utility Functions
 # -------------------------------
 def extract_text_from_pdf(file) -> str:
+    import io
+    import PyPDF2
     try:
+        # Try extracting text using PyPDF2
+        file.seek(0)
         reader = PyPDF2.PdfReader(file)
-        text = "\n".join(page.extract_text() for page in reader.pages if page.extract_text())
-        return text.strip()
+        text = ""
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        if text.strip():
+            return text.strip()
     except Exception as e:
-        st.error(f"Error processing PDF: {e}")
+        st.error(f"Error processing PDF with PyPDF2: {e}")
+    
+    # Fallback to OCR using pdf2image and pytesseract
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+        file.seek(0)
+        # Convert PDF pages to images
+        images = convert_from_bytes(file.read())
+        ocr_text = ""
+        for image in images:
+            ocr_text += pytesseract.image_to_string(image) + "\n"
+        if ocr_text.strip():
+            return ocr_text.strip()
+        else:
+            return ""
+    except Exception as ocr_e:
+        st.error(f"Error during OCR: {ocr_e}")
         return ""
+
 
 def clean_markdown_output(text: str) -> str:
     return text.replace("```markdown", "").replace("```", "")
@@ -789,5 +816,6 @@ elif st.session_state.step == 6:
                     st.session_state.pop(key)
             st.session_state.step = 0
             st.rerun()
+
 
 
