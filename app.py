@@ -771,7 +771,7 @@ elif st.session_state.step == 6:
                                         {"role": "user", "content": feedback_prompt}
                                     ],
                                     temperature=0.7,
-                                    max_tokens=500
+                                    max_tokens=2000
                                 )
                                 feedback = feedback_response.choices[0].message.content
                                 st.markdown("**Feedback on Your Answer:**")
