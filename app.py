@@ -90,63 +90,8 @@ st.markdown(
 )
 
 # -------------------------------
-# Session State Initialization
-# -------------------------------
-if "step" not in st.session_state:
-    st.session_state.step = 0  # start at Landing Page
-for key in ["cv_text", "cv_analysis", "jd_text", "jd_analysis", 
-            "fit_analysis", "cv_improvement", "interview_output", "parsed_questions", "jd_scraped"]:
-    if key not in st.session_state:
-        st.session_state[key] = None
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-# -------------------------------
-# Authentication
-# -------------------------------
-if not st.session_state.get("logged_in"):
-    st.title("Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if username in app_users and password == app_users[username]:
-            st.session_state.logged_in = True
-            st.success("Logged in successfully!")
-            st.rerun()
-        else:
-            st.error("Invalid username or password.")
-    st.stop()
-
-# -------------------------------
-# Navigation Functions
-# -------------------------------
-def go_to_module(new_module: int):
-    st.session_state.step = new_module
-    st.rerun()
-
-def reset_files():
-    for key in ["cv_text", "jd_text", "jd_analysis", "cv_analysis"]:
-        st.session_state.pop(key, None)
-    go_to_module(1)
-
-def reset_state():
-    for key in list(st.session_state.keys()):
-        if key not in ["logged_in"]:
-            st.session_state.pop(key)
-    st.session_state.step = 0
-    st.rerun()
-
-# -------------------------------
 # Utility Functions
 # -------------------------------
-def render_card(content: str):
-    # Convert markdown to HTML using the markdown library
-    html_content = md.markdown(content)
-    st.markdown(f"<div class='card'>{html_content}</div>", unsafe_allow_html=True)
-
-def clean_markdown_output(text: str) -> str:
-    return text.replace("```markdown", "").replace("```", "")
-
 def extract_text_from_pdf(file) -> str:
     try:
         reader = PyPDF2.PdfReader(file)
@@ -155,6 +100,9 @@ def extract_text_from_pdf(file) -> str:
     except Exception as e:
         st.error(f"Error processing PDF: {e}")
         return ""
+
+def clean_markdown_output(text: str) -> str:
+    return text.replace("```markdown", "").replace("```", "")
 
 def scrape_job_description(url: str):
     try:
@@ -176,15 +124,9 @@ def scrape_job_description(url: str):
     except Exception as e:
         return None, str(e)
 
-def clean_text(text: str) -> str:
-    replacements = {
-        "\u2018": "'", "\u2019": "'",
-        "\u201c": '"', "\u201d": '"',
-        "\u2013": "-", "\u2014": "-"
-    }
-    for orig, repl in replacements.items():
-        text = text.replace(orig, repl)
-    return text
+def render_card(content: str):
+    html_content = md.markdown(content)
+    st.markdown(f"<div class='card'>{html_content}</div>", unsafe_allow_html=True)
 
 def format_question(q_obj: dict):
     summary = q_obj.get("question", "").strip()
@@ -194,7 +136,21 @@ def format_question(q_obj: dict):
     return summary, details
 
 # -------------------------------
-# Prompt Templates
+# Session State Initialization
+# -------------------------------
+if "step" not in st.session_state:
+    st.session_state.step = 0  # start at Landing Page
+for key in ["cv_text", "cv_analysis", "jd_text", "jd_analysis", 
+            "fit_analysis", "cv_improvement", "interview_output", "parsed_questions", "jd_scraped"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "language" not in st.session_state:
+    st.session_state.language = "English"  # default language
+
+# -------------------------------
+# Prompt Templates (with language parameter)
 # -------------------------------
 CV_ANALYSIS_PROMPT = """Analyze the following CV and provide insightful observations that go beyond simply listing its content. Focus on identifying unique strengths and areas for improvement that the candidate may not have realized.
 
@@ -203,8 +159,10 @@ Observations:
 - Areas for improvement:
 
 CV Content:
-{cv_text}"""
+{cv_text}
 
+Respond in {language}."""
+ 
 JD_ANALYSIS_PROMPT = """Analyze the following job description and organize the key requirements and challenges in markdown. Ensure the output is well-formatted with clear bullet points.
 
 Key Requirements:
@@ -214,8 +172,10 @@ Key Requirements:
 4. Soft Skills
 
 Job Description:
-{jd_text}"""
+{jd_text}
 
+Respond in {language}."""
+ 
 FIT_ANALYSIS_PROMPT = """Based on the following raw CV and Job Description, generate a structured fit analysis.
 
 Overall Fit Score: [Score out of 100]
@@ -231,22 +191,24 @@ CV:
 
 Job Description:
 {jd_text}
-"""
 
-CV_ENHANCEMENT_PROMPT = """Based solely on the following CV content, identify phrases that can be rephrased to better match the provided job description and increase your chances of passing automated screening. For each suggestion, provide a bullet point that includes:
-- The exact phrase from the CV that should be changed.
-- The recommended new phrasing (do not add any new skills or fabricate experiences).
-- A brief rationale explaining why this change is needed.
+Respond in {language}."""
+ 
+CV_ENHANCEMENT_PROMPT = """Based solely on the following CV content, identify phrases that can be rephrased to better match the provided job description and increase your chances of passing automated screening. For each suggestion, please output in the following structured format:
+1. **Phrase:** <exact phrase from the CV that should be changed>
+   - **New Phrasing:** <the recommended new phrasing (do not add any new skills or fabricate experiences)>
+   - **Rationale:** <brief explanation with bullet points on why this change is needed>
 
-Do not suggest adding any new information—only reframe or reorder the existing content if possible. If no changes are needed, simply state that the CV is already well-aligned.
+If no changes are needed, simply state that the CV is already well-aligned.
 
 CV Content:
 {cv_text}
 
 Job Description:
 {jd_text}
-"""
 
+Respond in {language}."""
+ 
 INTERVIEW_QUESTIONS_PROMPT = """Based on the following CV and job description, generate interview questions likely to come up during an interview for the position grouped by category.
 The categories must be exactly: "Technical", "Behavioral", "CV Related".
 
@@ -255,23 +217,25 @@ For each category, output a list of 10 question objects. Each question object mu
 - "guidelines": A string with concise guidance in bullet points (max 100 tokens per question).
 - "fit_score": A number representing the candidate's fit score (1-100) with a brief explanation.
 
-Return only a valid JSON object with exactly three keys: "Technical", "Behavioral", and "CV Related". Do not include any extra text. Your output must be valid JSON.
+Return only a valid JSON object with exactly three keys: "Technical", "Behavioral", and "CV Related". Do not include any extra text.
 
 CV:
 {cv_text}
 
 Job Description:
 {jd_text}
-"""
 
+Respond in {language}."""
+ 
 FEEDBACK_PROMPT = """Evaluate the following interview answer using the appropriate framework (accuracy/soundness, STAR, etc.).
 Your response must begin with a clear pass/fail indicator using HTML: if the answer is good, start with '<span style="color: green;">PASS</span>'; if not, start with '<span style="color: red;">FAIL</span>'.
 Then, provide detailed feedback and suggestions for improvement.
 
 Question: {question}
 Answer: {answer}
-"""
 
+Respond in {language}."""
+ 
 # -------------------------------
 # Sidebar Navigation (Visible in Modules 1+)
 # -------------------------------
@@ -289,10 +253,15 @@ if st.session_state.step > 0:
         for label, mod_num, completed in modules:
             indicator = "✅" if completed else ""
             if st.button(f"{label} {indicator}", key=f"module_{mod_num}"):
-                go_to_module(mod_num)
+                st.session_state.step = mod_num
+                st.rerun()
         st.markdown("---")
         if st.button("Reset App", use_container_width=True):
-            reset_state()
+            for key in list(st.session_state.keys()):
+                if key not in ["logged_in", "language"]:
+                    st.session_state.pop(key)
+            st.session_state.step = 0
+            st.rerun()
 
 # -------------------------------
 # Landing Page (Module 0)
@@ -308,6 +277,9 @@ if st.session_state.step == 0:
 - **Enhance Your CV:** Get actionable suggestions to better tailor your CV.
 - **Practice Interviews:** Prepare with targeted interview questions and receive instant feedback.
     """)
+    st.markdown("### Select Your Preferred Language")
+    language = st.selectbox("Language", options=["English", "French", "Spanish"], key="language_select")
+    st.session_state.language = language
     if st.button("Get Started"):
         st.session_state.step = 1
         st.rerun()
@@ -346,7 +318,7 @@ if st.session_state.step == 1:
     if cv_text and st.button("Run CV Analysis", key="run_cv_analysis"):
         with st.spinner("Analyzing your CV..."):
             try:
-                prompt = CV_ANALYSIS_PROMPT.format(cv_text=cv_text)
+                prompt = CV_ANALYSIS_PROMPT.format(cv_text=cv_text, language=st.session_state.language)
                 response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[{"role": "user", "content": prompt}],
@@ -365,7 +337,8 @@ if st.session_state.step == 1:
         st.markdown("### Analysis Result")
         render_card(st.session_state.cv_analysis)
         if st.button("Next: Job Analysis", key="next_to_jd"):
-            go_to_module(2)
+            st.session_state.step = 2
+            st.rerun()
 
 # -------------------------------
 # Module 2: Job Analysis
@@ -374,7 +347,6 @@ elif st.session_state.step == 2:
     st.header("Module 2: Job Analysis")
     st.markdown("**Step 2:** Provide the Job Description either by entering a URL (to scrape) or by pasting it manually.")
     
-    # Two-column layout for job description input
     col1, col2 = st.columns(2)
     with col1:
         st.subheader("Job URL")
@@ -386,13 +358,12 @@ elif st.session_state.step == 2:
                     if error:
                         st.error(f"Scraping error: {error}")
                     elif scraped_text:
-                        st.session_state.jd_scraped = scraped_text  # Save the scraped text in session state
+                        st.session_state.jd_scraped = scraped_text
                         st.text_area("Scraped Job Description:", value=scraped_text, height=200, disabled=True)
     with col2:
         st.subheader("Manual Input")
         manual_jd = st.text_area("Paste the Job Description here", key="jd_manual", height=200)
     
-    # Prepare options: use scraped text if available, otherwise use manual input if provided.
     options = {}
     if st.session_state.jd_scraped:
         options["Scraped"] = st.session_state.jd_scraped
@@ -409,7 +380,7 @@ elif st.session_state.step == 2:
     if jd_text and st.button("Run Job Analysis", key="run_jd_analysis"):
         with st.spinner("Analyzing job description..."):
             try:
-                prompt = JD_ANALYSIS_PROMPT.format(jd_text=jd_text)
+                prompt = JD_ANALYSIS_PROMPT.format(jd_text=jd_text, language=st.session_state.language)
                 response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[{"role": "user", "content": prompt}],
@@ -430,7 +401,8 @@ elif st.session_state.step == 2:
         cleaned = clean_markdown_output(st.session_state.jd_analysis)
         render_card(cleaned)
         if st.button("Next: Fit Analysis", key="next_to_fit"):
-            go_to_module(3)
+            st.session_state.step = 3
+            st.rerun()
 
 # -------------------------------
 # Module 3: Fit Analysis & Tips
@@ -439,7 +411,6 @@ elif st.session_state.step == 3:
     st.header("Module 3: Fit Analysis & Tips")
     st.markdown("**Step 3:** Let’s see how well your CV fits the job. Upload new files if needed or use your current CV and Job Description.")
     
-    # Option to reupload or use current files
     option_files = st.radio("Select input option:", ["Use current files", "Upload new files"], key="files_option3")
     if option_files == "Upload new files":
         col1, col2 = st.columns(2)
@@ -471,7 +442,7 @@ elif st.session_state.step == 3:
     if cv_text and jd_text and st.button("Run Fit Analysis", key="run_fit_analysis"):
         with st.spinner("Calculating fit analysis..."):
             try:
-                prompt = FIT_ANALYSIS_PROMPT.format(cv_text=cv_text, jd_text=jd_text)
+                prompt = FIT_ANALYSIS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
                 response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[{"role": "user", "content": prompt}],
@@ -490,7 +461,8 @@ elif st.session_state.step == 3:
         st.markdown("### Fit Analysis & Tips")
         render_card(st.session_state.fit_analysis)
         if st.button("Next: CV Improvement Suggestions", key="next_to_cvimp"):
-            go_to_module(4)
+            st.session_state.step = 4
+            st.rerun()
 
 # -------------------------------
 # Module 4: CV Improvement Suggestions
@@ -530,7 +502,7 @@ elif st.session_state.step == 4:
     if cv_text and jd_text and st.button("Generate CV Improvement Suggestions", key="run_cvimp"):
         with st.spinner("Generating suggestions..."):
             try:
-                prompt = CV_ENHANCEMENT_PROMPT.format(cv_text=cv_text, jd_text=jd_text)
+                prompt = CV_ENHANCEMENT_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
                 response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[{"role": "user", "content": prompt}],
@@ -549,7 +521,8 @@ elif st.session_state.step == 4:
         st.markdown("### CV Improvement Suggestions")
         render_card(st.session_state.cv_improvement)
         if st.button("Next: Interview Prep", key="next_to_int"):
-            go_to_module(5)
+            st.session_state.step = 5
+            st.rerun()
 
 # -------------------------------
 # Module 5: Interview Questions & Guidance
@@ -593,7 +566,7 @@ elif st.session_state.step == 5:
         else:
             with st.spinner("Generating interview questions..."):
                 try:
-                    prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text)
+                    prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
                     messages = [{"role": "user", "content": prompt}]
                     functions = [{
                         "name": "get_interview_questions",
@@ -671,7 +644,8 @@ elif st.session_state.step == 5:
                 except Exception as e:
                     st.error(f"Error generating interview questions: {e}")
     if st.button("Next: Practice Interview", key="next_to_practice"):
-        go_to_module(6)
+        st.session_state.step = 6
+        st.rerun()
 
 # -------------------------------
 # Module 6: Practice Interviewing
@@ -680,7 +654,6 @@ elif st.session_state.step == 6:
     st.header("Module 6: Practice Interviewing")
     st.markdown("**Step 6:** Practice your interview skills. Select one of the generated questions or enter a custom one. Record or type your answer and receive immediate feedback.")
     
-    # Option to override files if needed
     if st.checkbox("Upload new CV and Job Description", key="override_files6"):
         option_files = st.radio("Select input option:", ["Use current files", "Upload new files"], key="files_option6")
         if option_files == "Upload new files":
@@ -713,12 +686,9 @@ elif st.session_state.step == 6:
         cv_text = st.session_state.cv_text
         jd_text = st.session_state.jd_text
     
-    # Option to regenerate interview questions
     if st.button("Regenerate Interview Questions", key="regen_questions6"):
-        if cv_text and jd_text:
-            new_questions = {}  # (Implement regeneration similar to Module 5 if desired)
-            st.session_state.parsed_questions = new_questions
-            st.rerun()
+        st.session_state.parsed_questions = {}
+        st.rerun()
     
     selected_question_obj = None
     if st.session_state.parsed_questions and isinstance(st.session_state.parsed_questions, dict):
@@ -742,7 +712,7 @@ elif st.session_state.step == 6:
         }
     
     if selected_question_obj:
-        summary, details = format_question(selected_question_obj)
+        summary, details = selected_question_obj.get("question"), selected_question_obj.get("guidelines")
         st.markdown(f"**Question:** {summary}")
         with st.expander("Show Question Details"):
             st.markdown(details)
@@ -766,7 +736,7 @@ elif st.session_state.step == 6:
                             if transcript and len(transcript.split()) >= 5:
                                 st.markdown("**Transcribed Answer:**")
                                 st.write(transcript)
-                                feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=transcript)
+                                feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=transcript, language=st.session_state.language)
                                 feedback_response = client.chat.completions.create(
                                     model="gpt-4o",
                                     messages=[
@@ -791,7 +761,7 @@ elif st.session_state.step == 6:
                     st.write(typed_answer)
                     with st.spinner("Generating feedback..."):
                         try:
-                            feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=typed_answer)
+                            feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=typed_answer, language=st.session_state.language)
                             feedback_response = client.chat.completions.create(
                                 model="gpt-4o",
                                 messages=[
@@ -810,8 +780,14 @@ elif st.session_state.step == 6:
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Back", key="back_practice"):
-            go_to_module(5)
+            st.session_state.step = 5
+            st.rerun()
     with col3:
         if st.button("Start Again", key="restart_practice"):
-            reset_state()
+            for key in list(st.session_state.keys()):
+                if key not in ["logged_in", "language"]:
+                    st.session_state.pop(key)
+            st.session_state.step = 0
+            st.rerun()
+
 
