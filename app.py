@@ -17,20 +17,6 @@ from firebase_admin import credentials, auth, db
 # -------------------------------
 load_dotenv()
 
-# OpenAI & APP_USERS
-openai_api_key = os.getenv("OPENAI_API_KEY")
-app_users_json = os.getenv("APP_USERS")
-if not openai_api_key:
-    st.error("OPENAI_API_KEY not found in environment variables.")
-    st.stop()
-if not app_users_json:
-    st.error("APP_USERS not defined in environment variables.")
-    st.stop()
-try:
-    app_users = json.loads(app_users_json)
-except Exception:
-    st.error("APP_USERS secret is not valid JSON.")
-    st.stop()
 
 # Stripe Credentials
 STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
