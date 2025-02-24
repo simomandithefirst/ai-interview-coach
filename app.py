@@ -46,25 +46,29 @@ if not firebase_client_config.get("apiKey"):
 # -------------------------------
 # Firebase Admin SDK Initialization
 # -------------------------------
-firebase_admin_creds = config.get("FIREBASE_ADMIN_CREDENTIALS")
+# Get Firebase Admin credentials from st.secrets
+firebase_admin_creds = st.secrets.get("FIREBASE_ADMIN_CREDENTIALS")
 if not firebase_admin_creds:
-    st.error("FIREBASE_ADMIN_CREDENTIALS not set in config.toml.")
+    st.error("FIREBASE_ADMIN_CREDENTIALS not set in st.secrets.")
     st.stop()
 
-try:
-    # Ensure the private key is correctly formatted
-    if "\\n" in firebase_admin_creds.get("private_key", ""):
-        firebase_admin_creds["private_key"] = firebase_admin_creds["private_key"].replace("\\n", "\n")
+# Convert the AttrDict to a normal dict
+firebase_admin_creds = dict(firebase_admin_creds)
 
-    # Write the cleaned credentials to a temporary JSON file
-    import tempfile
+# Ensure the private key is correctly formatted
+if "\\n" in firebase_admin_creds.get("private_key", ""):
+    firebase_admin_creds["private_key"] = firebase_admin_creds["private_key"].replace("\\n", "\n")
+
+# Write the cleaned credentials to a temporary JSON file
+import tempfile
+try:
     with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".json") as temp_file:
         json.dump(firebase_admin_creds, temp_file)
         temp_file_path = temp_file.name
-
 except Exception as e:
     st.error(f"Invalid Firebase Admin Credentials: {str(e)}")
     st.stop()
+
 
 admin_cred = credentials.Certificate(firebase_admin_creds)
 try:
