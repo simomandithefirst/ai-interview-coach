@@ -4,7 +4,7 @@ import json
 import requests
 from bs4 import BeautifulSoup
 import PyPDF2
-from dotenv import load_dotenv
+import toml  # to read the config.toml file
 import io
 import markdown as md  # alias for markdown
 from datetime import datetime, timedelta
@@ -13,53 +13,60 @@ import firebase_admin
 from firebase_admin import credentials, auth, db
 
 # -------------------------------
-# Load environment variables
+# Load configuration from TOML file
 # -------------------------------
-load_dotenv()
+try:
+    config = toml.load("config.toml")
+except Exception as e:
+    st.error(f"Error loading config.toml: {e}")
+    st.stop()
 
+# -------------------------------
+# Load API Keys & Credentials from config
+# -------------------------------
+# OpenAI & APP_USERS
+openai_api_key = config.get("OPENAI_API_KEY")
+app_users_json = config.get("APP_USERS")
+if not openai_api_key:
+    st.error("OPENAI_API_KEY not found in config.toml.")
+    st.stop()
 
 # Stripe Credentials
-STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
-PRO_PRICE_ID = os.getenv("PRO_PRICE_ID")
-ULTIMATE_PRICE_ID = os.getenv("ULTIMATE_PRICE_ID")
+STRIPE_API_KEY = config.get("STRIPE_API_KEY")
+PRO_PRICE_ID = config.get("PRO_PRICE_ID")
+ULTIMATE_PRICE_ID = config.get("ULTIMATE_PRICE_ID")
 if not STRIPE_API_KEY or not PRO_PRICE_ID or not ULTIMATE_PRICE_ID:
-    st.error("Stripe credentials are missing.")
+    st.error("Stripe credentials are missing in config.toml.")
     st.stop()
 
 # -------------------------------
 # Firebase Client Configuration
 # -------------------------------
-# Ensure your .env file includes the following keys:
-# FIREBASE_API_KEY, FIREBASE_AUTH_DOMAIN, FIREBASE_DATABASE_URL,
-# FIREBASE_PROJECT_ID, FIREBASE_STORAGE_BUCKET, FIREBASE_MESSAGING_SENDER_ID, FIREBASE_APP_ID
-
+firebase_config = config.get("FIREBASE", {})
 firebase_client_config = {
-    "apiKey": os.getenv("FIREBASE_API_KEY"),
-    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN"),
-    "databaseURL": os.getenv("FIREBASE_DATABASE_URL"),
-    "projectId": os.getenv("FIREBASE_PROJECT_ID"),
-    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
-    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID"),
-    "appId": os.getenv("FIREBASE_APP_ID")
+    "apiKey": firebase_config.get("API_KEY"),
+    "authDomain": firebase_config.get("AUTH_DOMAIN"),
+    "databaseURL": firebase_config.get("DATABASE_URL"),
+    "projectId": firebase_config.get("PROJECT_ID"),
+    "storageBucket": firebase_config.get("STORAGE_BUCKET"),
+    "messagingSenderId": firebase_config.get("MESSAGING_SENDER_ID"),
+    "appId": firebase_config.get("APP_ID")
 }
 if not firebase_client_config.get("apiKey"):
-    st.error("Firebase configuration is missing.")
+    st.error("Firebase configuration is missing in config.toml.")
     st.stop()
 
 # -------------------------------
 # Firebase Admin SDK Initialization
 # -------------------------------
-# Load the entire credentials JSON directly from the environment.
-firebase_admin_creds_json = os.getenv("FIREBASE_ADMIN_CREDENTIALS")
-if not firebase_admin_creds_json:
-    st.error("FIREBASE_ADMIN_CREDENTIALS not set in environment.")
+firebase_admin_creds = config.get("FIREBASE_ADMIN_CREDENTIALS")
+if not firebase_admin_creds:
+    st.error("FIREBASE_ADMIN_CREDENTIALS not set in config.toml.")
     st.stop()
-try:
-    # Load the credentials JSON
-    firebase_admin_creds = json.loads(firebase_admin_creds_json)
 
+try:
     # Ensure the private key is correctly formatted
-    if "\\n" in firebase_admin_creds["private_key"]:
+    if "\\n" in firebase_admin_creds.get("private_key", ""):
         firebase_admin_creds["private_key"] = firebase_admin_creds["private_key"].replace("\\n", "\n")
 
     # Write the cleaned credentials to a temporary JSON file
@@ -69,23 +76,25 @@ try:
         temp_file_path = temp_file.name
 
 except Exception as e:
-    st.error(f"Invalid Firebase Admin Credentials JSON: {str(e)}")
+    st.error(f"Invalid Firebase Admin Credentials: {str(e)}")
     st.stop()
+
 admin_cred = credentials.Certificate(firebase_admin_creds)
 try:
     firebase_admin.get_app()
 except ValueError:
     firebase_admin.initialize_app(admin_cred, {
-        "databaseURL": os.getenv("FIREBASE_DATABASE_URL")
+        "databaseURL": firebase_client_config.get("databaseURL")
     })
 
 # -------------------------------
-# Authentication Functions using Firebase Auth REST API and Admin SDK
+# Firebase Auth Functions (using REST API & Admin SDK)
 # -------------------------------
 FIREBASE_REST_API = "https://identitytoolkit.googleapis.com/v1"
 
 def login_user(email, password):
-    api_key = os.getenv("FIREBASE_API_KEY")
+    # Use the Firebase API key from the config (inside FIREBASE section)
+    api_key = firebase_config.get("API_KEY")
     url = f"{FIREBASE_REST_API}/accounts:signInWithPassword?key={api_key}"
     payload = {
         "email": email,
@@ -95,7 +104,6 @@ def login_user(email, password):
     response = requests.post(url, json=payload)
     if response.status_code == 200:
         data = response.json()
-        # Verify the ID token using Firebase Admin (optional)
         try:
             decoded = auth.verify_id_token(data["idToken"])
         except Exception as e:
@@ -108,7 +116,7 @@ def login_user(email, password):
         return None
 
 def signup_user(email, password):
-    api_key = os.getenv("FIREBASE_API_KEY")
+    api_key = firebase_config.get("API_KEY")
     url = f"{FIREBASE_REST_API}/accounts:signUp?key={api_key}"
     payload = {
         "email": email,
@@ -118,7 +126,6 @@ def signup_user(email, password):
     response = requests.post(url, json=payload)
     if response.status_code == 200:
         data = response.json()
-        # Generate an email verification link using Admin SDK
         try:
             link = auth.generate_email_verification_link(email)
             st.info(f"Please verify your email using this link: {link}")
@@ -1097,5 +1104,4 @@ elif st.session_state.step == 6:
             st.session_state.step = 0
             st.session_state.page = "landing"
             st.rerun()
-
 
