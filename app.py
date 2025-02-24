@@ -24,22 +24,10 @@ config = st.secrets
 # -------------------------------
 # OpenAI & APP_USERS
 openai_api_key = config.get("OPENAI_API_KEY")
-app_users_json = config.get("APP_USERS")
-if not openai_api_key:
-    st.error("OPENAI_API_KEY not found in config.toml.")
-    st.stop()
-
-# Stripe Credentials
 STRIPE_API_KEY = config.get("STRIPE_API_KEY")
 PRO_PRICE_ID = config.get("PRO_PRICE_ID")
 ULTIMATE_PRICE_ID = config.get("ULTIMATE_PRICE_ID")
-if not STRIPE_API_KEY or not PRO_PRICE_ID or not ULTIMATE_PRICE_ID:
-    st.error("Stripe credentials are missing in config.toml.")
-    st.stop()
-
-# -------------------------------
-# Firebase Client Configuration
-# -------------------------------
+# For nested sections:
 firebase_config = config.get("FIREBASE", {})
 firebase_client_config = {
     "apiKey": firebase_config.get("API_KEY"),
@@ -50,6 +38,7 @@ firebase_client_config = {
     "messagingSenderId": firebase_config.get("MESSAGING_SENDER_ID"),
     "appId": firebase_config.get("APP_ID")
 }
+
 if not firebase_client_config.get("apiKey"):
     st.error("Firebase configuration is missing in config.toml.")
     st.stop()
