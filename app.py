@@ -4,30 +4,63 @@ import json
 import requests
 from bs4 import BeautifulSoup
 import PyPDF2
-import toml  # to read the config.toml file
 import io
 import markdown as md  # alias for markdown
 from datetime import datetime, timedelta
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, auth, db
+import stripe  # Import Stripe
 
 # -------------------------------
-# Load configuration from TOML file
+# Load configuration from st.secrets
 # -------------------------------
-# Use st.secrets, which is automatically available on Streamlit Cloud.
 config = st.secrets
 
-
 # -------------------------------
-# Load API Keys & Credentials from config
+# Load API Keys & Credentials from st.secrets
 # -------------------------------
 # OpenAI & APP_USERS
 openai_api_key = config.get("OPENAI_API_KEY")
+app_users_json = config.get("APP_USERS")
+if not openai_api_key:
+    st.error("OPENAI_API_KEY not found in st.secrets.")
+    st.stop()
+
+# Stripe Credentials
 STRIPE_API_KEY = config.get("STRIPE_API_KEY")
 PRO_PRICE_ID = config.get("PRO_PRICE_ID")
 ULTIMATE_PRICE_ID = config.get("ULTIMATE_PRICE_ID")
-# For nested sections:
+if not STRIPE_API_KEY or not PRO_PRICE_ID or not ULTIMATE_PRICE_ID:
+    st.error("Stripe credentials are missing in st.secrets.")
+    st.stop()
+
+# -------------------------------
+# Define checkout session creation function
+# -------------------------------
+stripe.api_key = STRIPE_API_KEY
+
+def create_checkout_session(price_id, customer_email):
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=['card'],
+            mode='payment',
+            line_items=[{
+                'price': price_id,
+                'quantity': 1,
+            }],
+            customer_email=customer_email,
+            success_url="https://your-app-success-url.com",  # Update with your success URL
+            cancel_url="https://your-app-cancel-url.com",    # Update with your cancel URL
+        )
+        return session.url
+    except Exception as e:
+        st.error(f"Error creating checkout session: {e}")
+        return None
+
+# -------------------------------
+# Firebase Client Configuration
+# -------------------------------
 firebase_config = config.get("FIREBASE", {})
 firebase_client_config = {
     "apiKey": firebase_config.get("API_KEY"),
@@ -38,21 +71,19 @@ firebase_client_config = {
     "messagingSenderId": firebase_config.get("MESSAGING_SENDER_ID"),
     "appId": firebase_config.get("APP_ID")
 }
-
 if not firebase_client_config.get("apiKey"):
-    st.error("Firebase configuration is missing in config.toml.")
+    st.error("Firebase configuration is missing in st.secrets.")
     st.stop()
 
 # -------------------------------
 # Firebase Admin SDK Initialization
 # -------------------------------
-# Get Firebase Admin credentials from st.secrets
-firebase_admin_creds = st.secrets.get("FIREBASE_ADMIN_CREDENTIALS")
+firebase_admin_creds = config.get("FIREBASE_ADMIN_CREDENTIALS")
 if not firebase_admin_creds:
     st.error("FIREBASE_ADMIN_CREDENTIALS not set in st.secrets.")
     st.stop()
 
-# Convert the AttrDict to a normal dict
+# Convert to a plain dict if necessary
 firebase_admin_creds = dict(firebase_admin_creds)
 
 # Ensure the private key is correctly formatted
@@ -69,7 +100,6 @@ except Exception as e:
     st.error(f"Invalid Firebase Admin Credentials: {str(e)}")
     st.stop()
 
-
 admin_cred = credentials.Certificate(firebase_admin_creds)
 try:
     firebase_admin.get_app()
@@ -84,7 +114,6 @@ except ValueError:
 FIREBASE_REST_API = "https://identitytoolkit.googleapis.com/v1"
 
 def login_user(email, password):
-    # Use the Firebase API key from the config (inside FIREBASE section)
     api_key = firebase_config.get("API_KEY")
     url = f"{FIREBASE_REST_API}/accounts:signInWithPassword?key={api_key}"
     payload = {
