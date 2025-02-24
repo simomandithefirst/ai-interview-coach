@@ -9,9 +9,8 @@ import io
 import markdown as md  # alias for markdown
 from datetime import datetime, timedelta
 from openai import OpenAI
-import pyrebase
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import credentials, auth, db
 
 # -------------------------------
 # Load environment variables
@@ -42,9 +41,13 @@ if not STRIPE_API_KEY or not PRO_PRICE_ID or not ULTIMATE_PRICE_ID:
     st.stop()
 
 # -------------------------------
-# Firebase Setup for Authentication (Pyrebase)
+# Firebase Client Configuration
 # -------------------------------
-firebase_config = {
+# Ensure your .env file includes the following keys:
+# FIREBASE_API_KEY, FIREBASE_AUTH_DOMAIN, FIREBASE_DATABASE_URL,
+# FIREBASE_PROJECT_ID, FIREBASE_STORAGE_BUCKET, FIREBASE_MESSAGING_SENDER_ID, FIREBASE_APP_ID
+
+firebase_client_config = {
     "apiKey": os.getenv("FIREBASE_API_KEY"),
     "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN"),
     "databaseURL": os.getenv("FIREBASE_DATABASE_URL"),
@@ -53,20 +56,36 @@ firebase_config = {
     "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID"),
     "appId": os.getenv("FIREBASE_APP_ID")
 }
-if not firebase_config.get("apiKey"):
+if not firebase_client_config.get("apiKey"):
     st.error("Firebase configuration is missing.")
     st.stop()
-firebase = pyrebase.initialize_app(firebase_config)
-auth = firebase.auth()
 
 # -------------------------------
-# Firebase Admin SDK for Realtime Database
+# Firebase Admin SDK Initialization
 # -------------------------------
-admin_cred_path = os.getenv("FIREBASE_ADMIN_CREDENTIALS")
-if not admin_cred_path:
+# Load the entire credentials JSON directly from the environment.
+firebase_admin_creds_json = os.getenv("FIREBASE_ADMIN_CREDENTIALS")
+if not firebase_admin_creds_json:
     st.error("FIREBASE_ADMIN_CREDENTIALS not set in environment.")
     st.stop()
-admin_cred = credentials.Certificate(admin_cred_path)
+try:
+    # Load the credentials JSON
+    firebase_admin_creds = json.loads(firebase_admin_creds_json)
+
+    # Ensure the private key is correctly formatted
+    if "\\n" in firebase_admin_creds["private_key"]:
+        firebase_admin_creds["private_key"] = firebase_admin_creds["private_key"].replace("\\n", "\n")
+
+    # Write the cleaned credentials to a temporary JSON file
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".json") as temp_file:
+        json.dump(firebase_admin_creds, temp_file)
+        temp_file_path = temp_file.name
+
+except Exception as e:
+    st.error(f"Invalid Firebase Admin Credentials JSON: {str(e)}")
+    st.stop()
+admin_cred = credentials.Certificate(firebase_admin_creds)
 try:
     firebase_admin.get_app()
 except ValueError:
@@ -75,34 +94,57 @@ except ValueError:
     })
 
 # -------------------------------
-# Define Authentication Functions
+# Authentication Functions using Firebase Auth REST API and Admin SDK
 # -------------------------------
+FIREBASE_REST_API = "https://identitytoolkit.googleapis.com/v1"
+
 def login_user(email, password):
-    try:
-        user = auth.sign_in_with_email_and_password(email, password)
-        info = auth.get_account_info(user['idToken'])
-        if not info['users'][0].get('emailVerified', False):
-            st.error("Please verify your email before logging in.")
+    api_key = os.getenv("FIREBASE_API_KEY")
+    url = f"{FIREBASE_REST_API}/accounts:signInWithPassword?key={api_key}"
+    payload = {
+        "email": email,
+        "password": password,
+        "returnSecureToken": True
+    }
+    response = requests.post(url, json=payload)
+    if response.status_code == 200:
+        data = response.json()
+        # Verify the ID token using Firebase Admin (optional)
+        try:
+            decoded = auth.verify_id_token(data["idToken"])
+        except Exception as e:
+            st.error("Token verification failed.")
             return None
-        return user
-    except Exception as e:
-        st.error("Login failed. Check your credentials.")
+        return data
+    else:
+        error_msg = response.json().get("error", {}).get("message", "Unknown error")
+        st.error("Login failed: " + error_msg)
         return None
 
 def signup_user(email, password):
-    try:
-        user = auth.create_user_with_email_and_password(email, password)
-        auth.send_email_verification(user['idToken'])
-        st.success("Account created successfully. Please check your email to verify your account before logging in.")
-        store_user_in_db(user, email)
-        return user
-    except Exception as e:
-        st.error("Sign up failed. The email might already be in use or the password is too weak.")
+    api_key = os.getenv("FIREBASE_API_KEY")
+    url = f"{FIREBASE_REST_API}/accounts:signUp?key={api_key}"
+    payload = {
+        "email": email,
+        "password": password,
+        "returnSecureToken": True
+    }
+    response = requests.post(url, json=payload)
+    if response.status_code == 200:
+        data = response.json()
+        # Generate an email verification link using Admin SDK
+        try:
+            link = auth.generate_email_verification_link(email)
+            st.info(f"Please verify your email using this link: {link}")
+        except Exception as e:
+            st.error("Failed to generate email verification link: " + str(e))
+        store_user_in_db(data, email)
+        return data
+    else:
+        error_msg = response.json().get("error", {}).get("message", "Unknown error")
+        st.error("Sign up failed: " + error_msg)
         return None
 
-# -------------------------------
-# Logout Function
-# -------------------------------
 def logout_user():
     st.session_state.user = None
     st.session_state.customer_email = ""
@@ -115,37 +157,83 @@ def logout_user():
 # -------------------------------
 def store_user_in_db(user, email):
     ref = db.reference("users")
+    usage_init = {
+         "Module 1": 0,
+         "Module 2": 0,
+         "Module 3": 0,
+         "Module 4": 0,
+         "Module 5": 0,
+         "Module 6": 0,
+    }
+    subscription_init = {"package": "free", "expiry": None}
     ref.child(user["localId"]).set({
-        "email": email,
-        "created_at": datetime.now().isoformat()
+         "email": email,
+         "created_at": datetime.now().isoformat(),
+         "usage": usage_init,
+         "subscription": subscription_init
     })
 
 # -------------------------------
-# Initialize OpenAI Client
+# Firebase Admin Helper Functions for Usage & Subscription
 # -------------------------------
-client = OpenAI(api_key=openai_api_key)
+def get_user_data():
+    user_id = st.session_state.user["localId"]
+    ref = db.reference("users").child(user_id)
+    return ref.get()
+
+def record_module_run(module_name):
+    user_id = st.session_state.user["localId"]
+    user_ref = db.reference("users").child(user_id).child("usage")
+    current_usage = user_ref.child(module_name).get() or 0
+    new_usage = current_usage + 1
+    user_ref.update({module_name: new_usage})
+
+def can_run_module(module_name):
+    user_data = get_user_data()
+    subscription = user_data.get("subscription", {"package": "free", "expiry": None})
+    package = subscription.get("package", "free")
+    expiry = subscription.get("expiry")
+    if expiry:
+        expiry_date = datetime.fromisoformat(expiry)
+        if datetime.now() > expiry_date:
+            user_id = st.session_state.user["localId"]
+            db.reference("users").child(user_id).child("subscription").update({"package": "free", "expiry": None})
+            package = "free"
+    usage = user_data.get("usage", {})
+    current_runs = usage.get(module_name, 0)
+    if package == "free":
+        return current_runs < 5
+    elif package == "pro":
+        return current_runs < 100
+    elif package == "ultimate":
+        return True
+    return False
+
+def get_left_runs(module_name):
+    user_data = get_user_data()
+    subscription = user_data.get("subscription", {"package": "free", "expiry": None})
+    package = subscription.get("package", "free")
+    used = user_data.get("usage", {}).get(module_name, 0)
+    if package == "free":
+        return max(5 - used, 0)
+    elif package == "pro":
+        return max(100 - used, 0)
+    elif package == "ultimate":
+        return "Unlimited"
+    return 0
+
+SIX_MONTHS = timedelta(days=180)
+def update_tier_after_payment(plan):
+    expiry_date = datetime.now() + SIX_MONTHS
+    user_id = st.session_state.user["localId"]
+    db.reference("users").child(user_id).child("subscription").set({
+         "package": plan,
+         "expiry": expiry_date.isoformat()
+    })
+    st.success(f"Successfully upgraded to {plan.capitalize()}! Access valid until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # -------------------------------
-# Global CSS and Page Configuration
-# -------------------------------
-st.set_page_config(page_title="Career Catalyst", layout="wide")
-st.markdown(
-    """
-    <style>
-    body { background-color: #f7f7f7; font-family: 'Segoe UI', sans-serif; color: #2c3e50; }
-    .main, .stApp { background: #ffffff; border-radius: 10px; padding: 30px 20px; }
-    header, footer { visibility: hidden; }
-    h1, h2, h3 { text-align: center; margin-top: 0; color: #2c3e50; }
-    .module-title { color: #2c3e50; border-bottom: 2px solid #d4af37; margin-bottom: 10px; padding-bottom: 5px; text-transform: uppercase; text-align: center; }
-    .card { background-color: #ffffff; border: 2px solid #d4af37; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-    .upgrade-box { background-color: #e7f0fd; border: 2px solid #4a90e2; border-radius: 10px; padding: 20px; margin: 10px; }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-# -------------------------------
-# Utility Functions
+# Utility Functions (PDF extraction, scraping, etc.)
 # -------------------------------
 def extract_text_from_pdf(file) -> str:
     try:
@@ -356,66 +444,28 @@ Answer: {answer}
 Respond in {language}."""
 
 # -------------------------------
-# Payment and Tier Management
+# Initialize OpenAI Client
 # -------------------------------
-SIX_MONTHS = timedelta(days=180)
-def create_checkout_session(price_id, customer_email):
-    try:
-        import stripe
-        stripe.api_key = STRIPE_API_KEY
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=[{"price": price_id, "quantity": 1}],
-            mode="payment",
-            customer_email=customer_email,
-            success_url="https://yourapp.com/success?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url="https://yourapp.com/cancel",
-        )
-        return session.url
-    except Exception as e:
-        st.error(f"Error creating checkout session: {e}")
-        return None
-
-def update_tier_after_payment(plan):
-    st.session_state.user_package = plan
-    expiry_date = datetime.now() + SIX_MONTHS
-    st.session_state.package_expiry = expiry_date.isoformat()
-    st.success(f"Successfully upgraded to {plan.capitalize()}! Access valid until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}")
+client = OpenAI(api_key=openai_api_key)
 
 # -------------------------------
-# Usage Limits (Free tier: 5 runs per module)
+# Global CSS and Page Configuration
 # -------------------------------
-def can_run_module(module_name):
-    package_expiry = st.session_state.get("package_expiry")
-    if package_expiry:
-        expiry_date = datetime.fromisoformat(package_expiry)
-        if datetime.now() > expiry_date:
-            st.session_state.user_package = "free"
-            st.session_state.package_expiry = None
-            st.warning("Your upgraded package has expired. Reverting to Free access.")
-    package = st.session_state.get("user_package", "free")
-    current_runs = st.session_state.usage.get(module_name, 0)
-    if package == "free":
-        return current_runs < 5
-    elif package == "pro":
-        return current_runs < 100
-    elif package == "ultimate":
-        return True
-    return False
-
-def record_module_run(module_name):
-    st.session_state.usage[module_name] = st.session_state.usage.get(module_name, 0) + 1
-
-def get_left_runs(module_name):
-    package = st.session_state.get("user_package", "free")
-    used = st.session_state.usage.get(module_name, 0)
-    if package == "free":
-        return max(5 - used, 0)
-    elif package == "pro":
-        return max(100 - used, 0)
-    elif package == "ultimate":
-        return "Unlimited"
-    return 0
+st.set_page_config(page_title="Career Catalyst", layout="wide")
+st.markdown(
+    """
+    <style>
+    body { background-color: #f7f7f7; font-family: 'Segoe UI', sans-serif; color: #2c3e50; }
+    .main, .stApp { background: #ffffff; border-radius: 10px; padding: 30px 20px; }
+    header, footer { visibility: hidden; }
+    h1, h2, h3 { text-align: center; margin-top: 0; color: #2c3e50; }
+    .module-title { color: #2c3e50; border-bottom: 2px solid #d4af37; margin-bottom: 10px; padding-bottom: 5px; text-transform: uppercase; text-align: center; }
+    .card { background-color: #ffffff; border: 2px solid #d4af37; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+    .upgrade-box { background-color: #e7f0fd; border: 2px solid #4a90e2; border-radius: 10px; padding: 20px; margin: 10px; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # -------------------------------
 # Session State Initialization for Main App
@@ -439,10 +489,6 @@ if "cv_improvement" not in st.session_state: st.session_state.cv_improvement = N
 if "interview_output" not in st.session_state: st.session_state.interview_output = None
 if "parsed_questions" not in st.session_state: st.session_state.parsed_questions = None
 if "language" not in st.session_state: st.session_state.language = "English"
-if "user_package" not in st.session_state: st.session_state.user_package = "free"
-if "package_expiry" not in st.session_state: st.session_state.package_expiry = None
-if "usage" not in st.session_state:
-    st.session_state.usage = {"Module 1": 0, "Module 2": 0, "Module 3": 0, "Module 4": 0, "Module 5": 0, "Module 6": 0}
 if "show_upgrade" not in st.session_state:
     st.session_state.show_upgrade = False
 
@@ -529,15 +575,21 @@ if st.session_state.page == "settings":
     if st.button("← Back to Landing"):
         st.session_state.page = "landing"
         st.rerun()
+
+    user_data = get_user_data()
+    subscription = user_data.get("subscription", {"package": "free", "expiry": None})
+    package = subscription.get("package", "free")
+    expiry = subscription.get("expiry")
     st.subheader("Your Package Information")
-    st.write("**Current Package:**", st.session_state.user_package.capitalize())
-    if st.session_state.package_expiry:
-        expiry = datetime.fromisoformat(st.session_state.package_expiry)
-        st.write("**Access Valid Until:**", expiry.strftime('%Y-%m-%d %H:%M:%S'))
+    st.write("**Current Package:**", package.capitalize())
+    if expiry:
+        expiry_date = datetime.fromisoformat(expiry)
+        st.write("**Access Valid Until:**", expiry_date.strftime('%Y-%m-%d %H:%M:%S'))
     else:
         st.write("**Access Valid Until:** Free access (no expiry)")
     st.markdown("### Module Usage Summary")
-    for module, runs in st.session_state.usage.items():
+    usage = user_data.get("usage", {})
+    for module, runs in usage.items():
         left = get_left_runs(module)
         st.write(f"**{module}:** {runs} runs used, **Remaining:** {left}")
     st.markdown("---")
@@ -1059,4 +1111,5 @@ elif st.session_state.step == 6:
             st.session_state.step = 0
             st.session_state.page = "landing"
             st.rerun()
+
 
