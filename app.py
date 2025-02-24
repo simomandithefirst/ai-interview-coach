@@ -15,11 +15,9 @@ from firebase_admin import credentials, auth, db
 # -------------------------------
 # Load configuration from TOML file
 # -------------------------------
-try:
-    config = toml.load("config.toml")
-except Exception as e:
-    st.error(f"Error loading config.toml: {e}")
-    st.stop()
+# Use st.secrets, which is automatically available on Streamlit Cloud.
+config = st.secrets
+
 
 # -------------------------------
 # Load API Keys & Credentials from config
