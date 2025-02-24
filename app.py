@@ -6,87 +6,139 @@ from bs4 import BeautifulSoup
 import PyPDF2
 from dotenv import load_dotenv
 import io
-import markdown as md  # using alias 'md'
+import markdown as md  # alias for markdown
+from datetime import datetime, timedelta
 from openai import OpenAI
+import pyrebase
+import firebase_admin
+from firebase_admin import credentials, db
 
 # -------------------------------
-# Load environment variables and initialize client
+# Load environment variables
 # -------------------------------
 load_dotenv()
+
+# OpenAI & APP_USERS
 openai_api_key = os.getenv("OPENAI_API_KEY")
 app_users_json = os.getenv("APP_USERS")
-
 if not openai_api_key:
     st.error("OPENAI_API_KEY not found in environment variables.")
     st.stop()
 if not app_users_json:
     st.error("APP_USERS not defined in environment variables.")
     st.stop()
-
 try:
     app_users = json.loads(app_users_json)
 except Exception:
     st.error("APP_USERS secret is not valid JSON.")
     st.stop()
 
+# Stripe Credentials
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
+PRO_PRICE_ID = os.getenv("PRO_PRICE_ID")
+ULTIMATE_PRICE_ID = os.getenv("ULTIMATE_PRICE_ID")
+if not STRIPE_API_KEY or not PRO_PRICE_ID or not ULTIMATE_PRICE_ID:
+    st.error("Stripe credentials are missing.")
+    st.stop()
+
+# -------------------------------
+# Firebase Setup for Authentication (Pyrebase)
+# -------------------------------
+firebase_config = {
+    "apiKey": os.getenv("FIREBASE_API_KEY"),
+    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN"),
+    "databaseURL": os.getenv("FIREBASE_DATABASE_URL"),
+    "projectId": os.getenv("FIREBASE_PROJECT_ID"),
+    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
+    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID"),
+    "appId": os.getenv("FIREBASE_APP_ID")
+}
+if not firebase_config.get("apiKey"):
+    st.error("Firebase configuration is missing.")
+    st.stop()
+firebase = pyrebase.initialize_app(firebase_config)
+auth = firebase.auth()
+
+# -------------------------------
+# Firebase Admin SDK for Realtime Database
+# -------------------------------
+admin_cred_path = os.getenv("FIREBASE_ADMIN_CREDENTIALS")
+if not admin_cred_path:
+    st.error("FIREBASE_ADMIN_CREDENTIALS not set in environment.")
+    st.stop()
+admin_cred = credentials.Certificate(admin_cred_path)
+try:
+    firebase_admin.get_app()
+except ValueError:
+    firebase_admin.initialize_app(admin_cred, {
+        "databaseURL": os.getenv("FIREBASE_DATABASE_URL")
+    })
+
+# -------------------------------
+# Define Authentication Functions
+# -------------------------------
+def login_user(email, password):
+    try:
+        user = auth.sign_in_with_email_and_password(email, password)
+        info = auth.get_account_info(user['idToken'])
+        if not info['users'][0].get('emailVerified', False):
+            st.error("Please verify your email before logging in.")
+            return None
+        return user
+    except Exception as e:
+        st.error("Login failed. Check your credentials.")
+        return None
+
+def signup_user(email, password):
+    try:
+        user = auth.create_user_with_email_and_password(email, password)
+        auth.send_email_verification(user['idToken'])
+        st.success("Account created successfully. Please check your email to verify your account before logging in.")
+        store_user_in_db(user, email)
+        return user
+    except Exception as e:
+        st.error("Sign up failed. The email might already be in use or the password is too weak.")
+        return None
+
+# -------------------------------
+# Logout Function
+# -------------------------------
+def logout_user():
+    st.session_state.user = None
+    st.session_state.customer_email = ""
+    st.session_state.auth_page = "login"
+    st.session_state.page = "landing"
+    st.rerun()
+
+# -------------------------------
+# Store New User Info in Realtime Database
+# -------------------------------
+def store_user_in_db(user, email):
+    ref = db.reference("users")
+    ref.child(user["localId"]).set({
+        "email": email,
+        "created_at": datetime.now().isoformat()
+    })
+
+# -------------------------------
+# Initialize OpenAI Client
+# -------------------------------
 client = OpenAI(api_key=openai_api_key)
 
 # -------------------------------
 # Global CSS and Page Configuration
 # -------------------------------
 st.set_page_config(page_title="Career Catalyst", layout="wide")
-
 st.markdown(
     """
     <style>
-    body {
-        background-color: #f7f7f7;
-        font-family: 'Segoe UI', sans-serif;
-        color: #2c3e50;
-        margin: 0;
-        padding: 0;
-    }
-    .main, .stApp {
-        background: #ffffff;
-        border-radius: 10px;
-        padding: 30px 20px;
-    }
+    body { background-color: #f7f7f7; font-family: 'Segoe UI', sans-serif; color: #2c3e50; }
+    .main, .stApp { background: #ffffff; border-radius: 10px; padding: 30px 20px; }
     header, footer { visibility: hidden; }
-    h1, h2, h3 {
-        text-align: center;
-        margin-top: 0;
-        color: #2c3e50;
-    }
-    .module-title {
-        color: #2c3e50;
-        border-bottom: 2px solid #d4af37;
-        margin-bottom: 10px;
-        padding-bottom: 5px;
-        text-transform: uppercase;
-        text-align: center;
-    }
-    .card {
-        background-color: #ffffff;
-        border: 2px solid #d4af37;
-        border-radius: 10px;
-        padding: 20px;
-        margin-bottom: 20px;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    }
-    .output {
-        background: #ecf0f1;
-        padding: 15px;
-        border-radius: 5px;
-        white-space: pre-wrap;
-    }
-    [data-testid="stSidebar"] {
-        right: 0;
-        left: auto;
-        background: #fafafa;
-    }
-    .sidebar-content {
-        padding: 10px;
-    }
+    h1, h2, h3 { text-align: center; margin-top: 0; color: #2c3e50; }
+    .module-title { color: #2c3e50; border-bottom: 2px solid #d4af37; margin-bottom: 10px; padding-bottom: 5px; text-transform: uppercase; text-align: center; }
+    .card { background-color: #ffffff; border: 2px solid #d4af37; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+    .upgrade-box { background-color: #e7f0fd; border: 2px solid #4a90e2; border-radius: 10px; padding: 20px; margin: 10px; }
     </style>
     """,
     unsafe_allow_html=True
@@ -96,7 +148,6 @@ st.markdown(
 # Utility Functions
 # -------------------------------
 def extract_text_from_pdf(file) -> str:
-    """Extract text from a PDF using PyPDF2 primarily, fallback to OCR if necessary."""
     try:
         file.seek(0)
         reader = PyPDF2.PdfReader(file)
@@ -109,8 +160,6 @@ def extract_text_from_pdf(file) -> str:
             return text.strip()
     except Exception as e:
         st.error(f"Error processing PDF with PyPDF2: {e}")
-    
-    # Fallback to OCR using pdf2image and pytesseract
     try:
         from pdf2image import convert_from_bytes
         import pytesseract
@@ -119,17 +168,12 @@ def extract_text_from_pdf(file) -> str:
         ocr_text = ""
         for image in images:
             ocr_text += pytesseract.image_to_string(image) + "\n"
-        if ocr_text.strip():
-            return ocr_text.strip()
-        else:
-            return ""
+        return ocr_text.strip()
     except Exception as ocr_e:
         st.error(f"Error during OCR: {ocr_e}")
         return ""
 
-
 def scrape_job_description(url: str):
-    """Scrape a job description from a given URL."""
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=15)
@@ -145,64 +189,40 @@ def scrape_job_description(url: str):
             element = soup.find(**selector)
             if element and len(element.get_text(strip=True)) > 200:
                 return element.get_text(separator="\n", strip=True), None
-        # Fallback: return entire page text
         return soup.get_text(separator="\n", strip=True), None
     except Exception as e:
         return None, str(e)
 
-
 def render_card(content: str):
-    """Render markdown content inside a styled card."""
     html_content = md.markdown(content)
     st.markdown(f"<div class='card'>{html_content}</div>", unsafe_allow_html=True)
 
-
 def clean_markdown_output(text: str) -> str:
-    """Remove markdown code fences from text."""
     return text.replace("```markdown", "").replace("```", "")
 
-
 def format_question(q_obj: dict):
-    """Format question info from the parsed JSON."""
     summary = q_obj.get("question", "").strip()
     guidelines = q_obj.get("guidelines", "").strip()
     fit_score = q_obj.get("fit_score", "")
     details = f"**Guidelines:** {guidelines}\n\n**Candidate Fit Score:** {fit_score}"
     return summary, details
 
-# -------------------------------
-# Shared Helper (Modules 3-6):
-# Let user keep or update both CV & JD
-# -------------------------------
 def update_or_keep_cv_jd():
-    """For modules 3 and above, let user keep or update BOTH CV and JD."""
-    cv_exists = bool(st.session_state.cv_text)
-    jd_exists = bool(st.session_state.jd_text)
-
     st.info("You can keep your current CV/JD or update them below.")
-
-    # Show current CV and JD
     st.markdown("#### Current CV (Read-only)")
     st.text_area("CV Text", value=st.session_state.cv_text or "No CV provided yet.", height=120, disabled=True)
-
     st.markdown("#### Current JD (Read-only)")
     st.text_area("JD Text", value=st.session_state.jd_text or "No JD provided yet.", height=120, disabled=True)
-
     choice = st.radio("Do you want to update anything?",
                       ["Keep both CV & JD", "Update CV only", "Update JD only", "Update both"],
-                      key=f"update_choice_module_{st.session_state.step}")
-
-    if choice == "Keep both CV & JD":
-        pass  # do nothing
-
-    elif choice == "Update CV only":
-        new_cv = st.file_uploader("Upload your new CV (PDF)", type=["pdf"], key=f"cv_reupload_m{st.session_state.step}")
+                      key=f"update_choice_module_{st.session_state.get('step', 0)}")
+    if choice == "Update CV only":
+        new_cv = st.file_uploader("Upload your new CV (PDF)", type=["pdf"], key=f"cv_reupload_m{st.session_state.get('step', 0)}")
         if new_cv:
             cv_text = extract_text_from_pdf(new_cv)
             if cv_text:
                 st.session_state.cv_text = cv_text
                 st.success("CV updated successfully!")
-
     elif choice == "Update JD only":
         st.markdown("**Option A:** Scrape from a URL")
         new_jd_url = st.text_input("Enter new JD URL")
@@ -214,23 +234,20 @@ def update_or_keep_cv_jd():
                 elif scraped_text:
                     st.session_state.jd_text = scraped_text
                     st.success("Job description updated (scraped) successfully!")
-
         st.markdown("**Option B:** Paste new JD below")
         new_jd_manual = st.text_area("Paste new Job Description", height=120)
         if new_jd_manual.strip():
             if st.button("Use This New JD"):
                 st.session_state.jd_text = new_jd_manual.strip()
                 st.success("Job description updated successfully!")
-
-    else:  # Update both
+    elif choice == "Update both":
         st.write("### Update CV")
-        new_cv = st.file_uploader("Upload your new CV (PDF)", type=["pdf"], key=f"cv_reupload_both_m{st.session_state.step}")
+        new_cv = st.file_uploader("Upload your new CV (PDF)", type=["pdf"], key=f"cv_reupload_both_m{st.session_state.get('step', 0)}")
         if new_cv:
             cv_text = extract_text_from_pdf(new_cv)
             if cv_text:
                 st.session_state.cv_text = cv_text
                 st.success("CV updated successfully!")
-
         st.write("---")
         st.write("### Update Job Description")
         new_jd_url = st.text_input("Enter new JD URL (optional)")
@@ -242,18 +259,16 @@ def update_or_keep_cv_jd():
                 elif scraped_text:
                     st.session_state.jd_text = scraped_text
                     st.success("Job description updated (scraped) successfully!")
-
-        new_jd_manual = st.text_area("Paste new Job Description", height=120, key=f"jd_textarea_both_m{st.session_state.step}")
+        new_jd_manual = st.text_area("Paste new Job Description", height=120, key=f"jd_textarea_both_m{st.session_state.get('step', 0)}")
         if new_jd_manual.strip():
             if st.button("Use This New JD (Both)"):
                 st.session_state.jd_text = new_jd_manual.strip()
                 st.success("Job description updated successfully!")
-
-
-
+    else:
+        pass
 
 # -------------------------------
-# Prompt Templates (with language parameter)
+# Prompt Templates
 # -------------------------------
 CV_ANALYSIS_PROMPT = """Analyze the following CV and provide insightful observations that go beyond simply listing its content. 
 Focus on identifying unique strengths and areas for improvement that the candidate may not have realized.
@@ -266,7 +281,6 @@ CV Content:
 {cv_text}
 
 Respond in {language}."""
-
 JD_ANALYSIS_PROMPT = """Analyze the following job description and organize the key requirements and challenges in markdown. 
 Ensure the output is well-formatted with clear bullet points.
 
@@ -280,7 +294,6 @@ Job Description:
 {jd_text}
 
 Respond in {language}."""
-
 FIT_ANALYSIS_PROMPT = """Based on the following raw CV and Job Description, generate a structured fit analysis.
 
 Overall Fit Score: [Score out of 100]
@@ -298,7 +311,6 @@ Job Description:
 {jd_text}
 
 Respond in {language}."""
-
 CV_ENHANCEMENT_PROMPT = """Based solely on the following CV content, identify phrases that can be rephrased to better match 
 the provided job description and increase your chances of passing automated screening. For each suggestion, please output in 
 the following structured format:
@@ -315,7 +327,6 @@ Job Description:
 {jd_text}
 
 Respond in {language}."""
-
 INTERVIEW_QUESTIONS_PROMPT = """Based on the following CV and job description, generate interview questions likely to come up 
 during an interview for the position grouped by category.
 The categories must be exactly: "Technical", "Behavioral", "CV Related".
@@ -335,7 +346,6 @@ Job Description:
 {jd_text}
 
 Respond in {language}."""
-
 FEEDBACK_PROMPT = """Evaluate the following interview answer using the appropriate framework (accuracy/soundness, STAR, etc.).
 Your response must begin with a clear pass/fail indicator using HTML: if the answer is good, start with '<span style="color: green;">PASS</span>'; 
 if not, start with '<span style="color: red;">FAIL</span>'. Then, provide detailed feedback and suggestions for improvement.
@@ -346,32 +356,148 @@ Answer: {answer}
 Respond in {language}."""
 
 # -------------------------------
-# Session State Initialization
+# Payment and Tier Management
 # -------------------------------
+SIX_MONTHS = timedelta(days=180)
+def create_checkout_session(price_id, customer_email):
+    try:
+        import stripe
+        stripe.api_key = STRIPE_API_KEY
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            mode="payment",
+            customer_email=customer_email,
+            success_url="https://yourapp.com/success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url="https://yourapp.com/cancel",
+        )
+        return session.url
+    except Exception as e:
+        st.error(f"Error creating checkout session: {e}")
+        return None
+
+def update_tier_after_payment(plan):
+    st.session_state.user_package = plan
+    expiry_date = datetime.now() + SIX_MONTHS
+    st.session_state.package_expiry = expiry_date.isoformat()
+    st.success(f"Successfully upgraded to {plan.capitalize()}! Access valid until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# -------------------------------
+# Usage Limits (Free tier: 5 runs per module)
+# -------------------------------
+def can_run_module(module_name):
+    package_expiry = st.session_state.get("package_expiry")
+    if package_expiry:
+        expiry_date = datetime.fromisoformat(package_expiry)
+        if datetime.now() > expiry_date:
+            st.session_state.user_package = "free"
+            st.session_state.package_expiry = None
+            st.warning("Your upgraded package has expired. Reverting to Free access.")
+    package = st.session_state.get("user_package", "free")
+    current_runs = st.session_state.usage.get(module_name, 0)
+    if package == "free":
+        return current_runs < 5
+    elif package == "pro":
+        return current_runs < 100
+    elif package == "ultimate":
+        return True
+    return False
+
+def record_module_run(module_name):
+    st.session_state.usage[module_name] = st.session_state.usage.get(module_name, 0) + 1
+
+def get_left_runs(module_name):
+    package = st.session_state.get("user_package", "free")
+    used = st.session_state.usage.get(module_name, 0)
+    if package == "free":
+        return max(5 - used, 0)
+    elif package == "pro":
+        return max(100 - used, 0)
+    elif package == "ultimate":
+        return "Unlimited"
+    return 0
+
+# -------------------------------
+# Session State Initialization for Main App
+# -------------------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "customer_email" not in st.session_state:
+    st.session_state.customer_email = ""
+if "auth_page" not in st.session_state:
+    st.session_state.auth_page = "login"
 if "step" not in st.session_state:
-    st.session_state.step = 0  # start at Landing Page
-
-for key in [
-    "cv_text", "cv_analysis", "jd_text", "jd_analysis", 
-    "fit_analysis", "cv_improvement", "interview_output", 
-    "parsed_questions", "jd_scraped"
-]:
-    if key not in st.session_state:
-        st.session_state[key] = None
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-if "language" not in st.session_state:
-    st.session_state.language = "English"  # default language
-
+    st.session_state.step = 0  # 0 = landing, 1..6 = modules
+if "page" not in st.session_state:
+    st.session_state.page = "landing"
+if "cv_text" not in st.session_state: st.session_state.cv_text = None
+if "cv_analysis" not in st.session_state: st.session_state.cv_analysis = None
+if "jd_text" not in st.session_state: st.session_state.jd_text = None
+if "jd_analysis" not in st.session_state: st.session_state.jd_analysis = None
+if "fit_analysis" not in st.session_state: st.session_state.fit_analysis = None
+if "cv_improvement" not in st.session_state: st.session_state.cv_improvement = None
+if "interview_output" not in st.session_state: st.session_state.interview_output = None
+if "parsed_questions" not in st.session_state: st.session_state.parsed_questions = None
+if "language" not in st.session_state: st.session_state.language = "English"
+if "user_package" not in st.session_state: st.session_state.user_package = "free"
+if "package_expiry" not in st.session_state: st.session_state.package_expiry = None
+if "usage" not in st.session_state:
+    st.session_state.usage = {"Module 1": 0, "Module 2": 0, "Module 3": 0, "Module 4": 0, "Module 5": 0, "Module 6": 0}
+if "show_upgrade" not in st.session_state:
+    st.session_state.show_upgrade = False
 
 # -------------------------------
-# Sidebar Navigation
+# Authentication Pages
 # -------------------------------
-if st.session_state.step > 0:
-    with st.sidebar:
-        st.markdown("<div class='sidebar-content'>", unsafe_allow_html=True)
+def login_page():
+    st.title("Login")
+    email = st.text_input("Email", key="login_email")
+    password = st.text_input("Password", type="password", key="login_password")
+    if st.button("Log In"):
+        user = login_user(email, password)
+        if user:
+            st.session_state.user = user
+            st.session_state.customer_email = email
+            st.success("Logged in successfully!")
+            st.rerun()
+    st.markdown("Don't have an account?")
+    if st.button("Go to Sign Up"):
+        st.session_state.auth_page = "signup"
+        st.rerun()
+
+def signup_page():
+    st.title("Sign Up")
+    email = st.text_input("Email", key="signup_email")
+    password = st.text_input("Password", type="password", key="signup_password")
+    if st.button("Sign Up"):
+        user = signup_user(email, password)
+        if user:
+            st.session_state.auth_page = "login"
+            st.rerun()
+    st.markdown("Already have an account?")
+    if st.button("Go to Log In"):
+        st.session_state.auth_page = "login"
+        st.rerun()
+
+# -------------------------------
+# Show Authentication if Not Logged In
+# -------------------------------
+if st.session_state.user is None:
+    if st.session_state.auth_page == "login":
+        login_page()
+    else:
+        signup_page()
+    st.stop()
+
+# -------------------------------
+# Sidebar Navigation with Logout using on_click callback
+# -------------------------------
+with st.sidebar:
+    st.button("Logout", on_click=logout_user)
+    if st.button("Settings"):
+        st.session_state.page = "settings"
+        st.rerun()
+    if st.session_state.step > 0:
         st.markdown("## Modules")
         modules = [
             ("Module 1: CV Analysis", 1, st.session_state.cv_analysis is not None),
@@ -385,27 +511,80 @@ if st.session_state.step > 0:
             indicator = "✅" if completed else ""
             if st.button(f"{label} {indicator}", key=f"module_{mod_num}"):
                 st.session_state.step = mod_num
+                st.session_state.page = "landing"
                 st.rerun()
-
-        st.markdown("---")
         if st.button("Reset App", use_container_width=True):
             for key in list(st.session_state.keys()):
-                if key not in ["logged_in", "language"]:
+                if key not in ["user", "auth_page", "customer_email", "page"]:
                     st.session_state.pop(key)
             st.session_state.step = 0
+            st.session_state.page = "landing"
             st.rerun()
 
+# -------------------------------
+# Settings Page with Upgrade Options
+# -------------------------------
+if st.session_state.page == "settings":
+    st.title("Settings")
+    if st.button("← Back to Landing"):
+        st.session_state.page = "landing"
+        st.rerun()
+    st.subheader("Your Package Information")
+    st.write("**Current Package:**", st.session_state.user_package.capitalize())
+    if st.session_state.package_expiry:
+        expiry = datetime.fromisoformat(st.session_state.package_expiry)
+        st.write("**Access Valid Until:**", expiry.strftime('%Y-%m-%d %H:%M:%S'))
+    else:
+        st.write("**Access Valid Until:** Free access (no expiry)")
+    st.markdown("### Module Usage Summary")
+    for module, runs in st.session_state.usage.items():
+        left = get_left_runs(module)
+        st.write(f"**{module}:** {runs} runs used, **Remaining:** {left}")
+    st.markdown("---")
+    st.markdown("## Upgrade Your Access (6-Month Access)")
+    st.markdown("Upgrade to **Pro** (100 runs per module) or **Ultimate** (Unlimited runs) with a one‑time payment.")
+    if not st.session_state.customer_email:
+        st.session_state.customer_email = st.text_input("Enter your email for upgrade", key="global_email")
+    else:
+        st.text_input("Your email for upgrade", value=st.session_state.customer_email, key="global_email", disabled=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("<div class='upgrade-box'>", unsafe_allow_html=True)
+        st.markdown("### Pro Package")
+        st.markdown("**Price:** $11.99 (One-time)")
+        st.markdown("**Benefit:** 100 runs per module for 6 months")
+        if st.button("Buy Pro Package"):
+            if st.session_state.customer_email:
+                checkout_url = create_checkout_session(PRO_PRICE_ID, st.session_state.customer_email)
+                if checkout_url:
+                    st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
+                    st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
+            else:
+                st.error("Please enter your email for upgrade.")
         st.markdown("</div>", unsafe_allow_html=True)
-
+    with col2:
+        st.markdown("<div class='upgrade-box'>", unsafe_allow_html=True)
+        st.markdown("### Ultimate Package")
+        st.markdown("**Price:** $29.99 (One-time)")
+        st.markdown("**Benefit:** Unlimited runs per module for 6 months")
+        if st.button("Buy Ultimate Package"):
+            if st.session_state.customer_email:
+                checkout_url = create_checkout_session(ULTIMATE_PRICE_ID, st.session_state.customer_email)
+                if checkout_url:
+                    st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
+                    st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
+            else:
+                st.error("Please enter your email for upgrade.")
+        st.markdown("</div>", unsafe_allow_html=True)
+    st.stop()
 
 # -------------------------------
-# Landing Page (Module 0)
+# Landing Page
 # -------------------------------
-if st.session_state.step == 0:
+if st.session_state.page == "landing" and st.session_state.step == 0:
     st.title("Career Catalyst")
-    st.markdown("## Welcome to Career Catalyst")
     st.markdown("""
-**Career Catalyst** is your personal career enhancement platform. 
+**Career Catalyst** is your personal career enhancement platform.  
 Whether you're applying for a job or preparing for an interview, our tools will help you:
 - **Analyze Your CV:** Identify your unique strengths and potential areas for improvement.
 - **Break Down Job Descriptions:** Understand key requirements and challenges.
@@ -413,23 +592,65 @@ Whether you're applying for a job or preparing for an interview, our tools will 
 - **Enhance Your CV:** Get actionable suggestions to better tailor your CV.
 - **Practice Interviews:** Prepare with targeted interview questions and receive instant feedback.
     """)
-
     st.markdown("### Select Your Preferred Language")
     language = st.selectbox("Language", options=["English", "French", "Spanish"], key="language_select")
     st.session_state.language = language
 
+    st.info("Enjoy our free tier – no payment required to get started!")
     if st.button("Get Started"):
         st.session_state.step = 1
         st.rerun()
 
-# -------------------------------
-# Module 1: CV Analysis (CV Only)
-# -------------------------------
-elif st.session_state.step == 1:
-    st.header("Module 1: CV Analysis")
-    st.markdown("<div class='module-title'>Upload Your CV (PDF) for Analysis</div>", unsafe_allow_html=True)
+    if st.button("View Upgrade Options"):
+        st.session_state.show_upgrade = True
+        st.rerun()
 
-    # If CV not in session, force upload
+    if st.session_state.show_upgrade:
+        st.markdown("## Upgrade Your Access (6-Month Access)")
+        st.markdown("Upgrade to **Pro** (100 runs per module) or **Ultimate** (Unlimited runs) with a one‑time payment.")
+        if not st.session_state.customer_email:
+            st.session_state.customer_email = st.text_input("Enter your email for upgrade", key="global_email")
+        else:
+            st.text_input("Your email for upgrade", value=st.session_state.customer_email, key="global_email", disabled=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("<div class='upgrade-box'>", unsafe_allow_html=True)
+            st.markdown("### Pro Package")
+            st.markdown("**Price:** $11.99 (One-time)")
+            st.markdown("**Benefit:** 100 runs per module for 6 months")
+            if st.button("Buy Pro Package"):
+                if st.session_state.customer_email:
+                    checkout_url = create_checkout_session(PRO_PRICE_ID, st.session_state.customer_email)
+                    if checkout_url:
+                        st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
+                        st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
+                else:
+                    st.error("Please enter your email for upgrade.")
+            st.markdown("</div>", unsafe_allow_html=True)
+        with col2:
+            st.markdown("<div class='upgrade-box'>", unsafe_allow_html=True)
+            st.markdown("### Ultimate Package")
+            st.markdown("**Price:** $29.99 (One-time)")
+            st.markdown("**Benefit:** Unlimited runs per module for 6 months")
+            if st.button("Buy Ultimate Package"):
+                if st.session_state.customer_email:
+                    checkout_url = create_checkout_session(ULTIMATE_PRICE_ID, st.session_state.customer_email)
+                    if checkout_url:
+                        st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
+                        st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
+                else:
+                    st.error("Please enter your email for upgrade.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+# -------------------------------
+# Module Pages (Modules 1-6)
+# -------------------------------
+if st.session_state.step == 1:
+    if not can_run_module("Module 1"):
+        st.error("Access blocked: You have reached your allowed runs for Module 1. Please upgrade for more runs.")
+        st.stop()
+    st.title("Module 1: CV Analysis")
+    st.markdown("<div class='module-title'>Upload Your CV (PDF) for Analysis</div>", unsafe_allow_html=True)
     if not st.session_state.cv_text:
         uploaded_cv = st.file_uploader("Upload your CV (PDF)", type=["pdf"], key="cv_upload_m1")
         if uploaded_cv is not None:
@@ -440,8 +661,7 @@ elif st.session_state.step == 1:
         else:
             st.warning("Please upload a valid CV to proceed.")
     else:
-        # If CV is in session, let user keep or reupload
-        st.markdown("**Current CV**:")
+        st.markdown("**Current CV:**")
         st.text_area("CV Text (read-only):", value=st.session_state.cv_text, height=180, disabled=True)
         if st.radio("Do you want to keep or replace this CV?", ("Keep CV", "Replace CV"), key="cv_choice_m1") == "Replace CV":
             new_cv = st.file_uploader("Upload your new CV (PDF)", type=["pdf"], key="cv_upload_replace_m1")
@@ -450,17 +670,12 @@ elif st.session_state.step == 1:
                 if cv_text:
                     st.session_state.cv_text = cv_text
                     st.success("CV replaced successfully!")
-
-    # Now show the "Run CV Analysis" if we have a CV
     if st.session_state.cv_text:
         st.markdown("### CV Analysis")
         if st.button("Run CV Analysis", key="run_cv_analysis"):
             with st.spinner("Analyzing your CV..."):
                 try:
-                    prompt = CV_ANALYSIS_PROMPT.format(
-                        cv_text=st.session_state.cv_text,
-                        language=st.session_state.language
-                    )
+                    prompt = CV_ANALYSIS_PROMPT.format(cv_text=st.session_state.cv_text, language=st.session_state.language)
                     response = client.chat.completions.create(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
@@ -470,11 +685,11 @@ elif st.session_state.step == 1:
                     result = response.choices[0].message.content.strip()
                     if result and len(result) > 20:
                         st.session_state.cv_analysis = result
+                        record_module_run("Module 1")
                     else:
                         st.error("CV Analysis returned an unexpected result.")
                 except Exception as e:
                     st.error(f"Error analyzing CV: {e}")
-
     if st.session_state.cv_analysis:
         st.markdown("### Analysis Result")
         render_card(st.session_state.cv_analysis)
@@ -482,14 +697,12 @@ elif st.session_state.step == 1:
             st.session_state.step = 2
             st.rerun()
 
-# -------------------------------
-# Module 2: Job Analysis (JD Only)
-# -------------------------------
 elif st.session_state.step == 2:
-    st.header("Module 2: Job Analysis")
+    if not can_run_module("Module 2"):
+        st.error("Access blocked: You have reached your allowed runs for Module 2. Please upgrade for more runs.")
+        st.stop()
+    st.title("Module 2: Job Analysis")
     st.markdown("<div class='module-title'>Provide the Job Description</div>", unsafe_allow_html=True)
-
-    # If JD not in session, ask user to upload or paste
     if not st.session_state.jd_text:
         st.markdown("**Option A:** Scrape from a URL")
         jd_url = st.text_input("Enter Job Posting URL", key="jd_url_m2")
@@ -501,7 +714,6 @@ elif st.session_state.step == 2:
                 elif scraped_text:
                     st.session_state.jd_text = scraped_text
                     st.success("Job description scraped successfully!")
-
         st.write("---")
         st.markdown("**Option B:** Paste Manually")
         manual_jd = st.text_area("Paste the Job Description here", key="jd_manual_m2", height=200)
@@ -510,8 +722,7 @@ elif st.session_state.step == 2:
                 st.session_state.jd_text = manual_jd.strip()
                 st.success("Job description set successfully!")
     else:
-        # If JD is in session, let user keep or replace
-        st.markdown("**Current Job Description**:")
+        st.markdown("**Current Job Description:**")
         st.text_area("JD Text (read-only):", value=st.session_state.jd_text, height=180, disabled=True)
         if st.radio("Do you want to keep or replace this JD?", ("Keep JD", "Replace JD"), key="jd_choice_m2") == "Replace JD":
             st.markdown("**Option A:** Scrape from a URL")
@@ -524,25 +735,19 @@ elif st.session_state.step == 2:
                     elif scraped_text:
                         st.session_state.jd_text = scraped_text
                         st.success("Job description scraped successfully!")
-
             st.write("---")
             st.markdown("**Option B:** Paste Manually")
             manual_jd = st.text_area("Paste new Job Description here", key="jd_replace_manual_m2", height=200)
             if manual_jd.strip():
-                if st.button("Use This New Job Description", key="use_manual_jd_replace_m2"):
+                if st.button("Use This Job Description", key="use_manual_jd_replace_m2"):
                     st.session_state.jd_text = manual_jd.strip()
                     st.success("Job description replaced successfully!")
-
-    # Now show "Run JD Analysis" if we have JD
     if st.session_state.jd_text:
         st.markdown("### Job Description Analysis")
         if st.button("Run Job Analysis", key="run_jd_analysis"):
             with st.spinner("Analyzing job description..."):
                 try:
-                    prompt = JD_ANALYSIS_PROMPT.format(
-                        jd_text=st.session_state.jd_text,
-                        language=st.session_state.language
-                    )
+                    prompt = JD_ANALYSIS_PROMPT.format(jd_text=st.session_state.jd_text, language=st.session_state.language)
                     response = client.chat.completions.create(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
@@ -552,11 +757,11 @@ elif st.session_state.step == 2:
                     result = response.choices[0].message.content.strip()
                     if result and len(result) > 20:
                         st.session_state.jd_analysis = result
+                        record_module_run("Module 2")
                     else:
                         st.error("Job Analysis returned an unexpected result.")
                 except Exception as e:
                     st.error(f"Error analyzing job description: {e}")
-
     if st.session_state.jd_analysis:
         st.markdown("### Job Analysis Result")
         cleaned = clean_markdown_output(st.session_state.jd_analysis)
@@ -565,30 +770,21 @@ elif st.session_state.step == 2:
             st.session_state.step = 3
             st.rerun()
 
-
-# -------------------------------
-# Module 3: Fit Analysis & Tips
-# -------------------------------
 elif st.session_state.step == 3:
-    st.header("Module 3: Fit Analysis & Tips")
+    if not can_run_module("Module 3"):
+        st.error("Access blocked: You have reached your allowed runs for Module 3. Please upgrade for more runs.")
+        st.stop()
+    st.title("Module 3: Fit Analysis & Tips")
     st.markdown("<div class='module-title'>Let's See How Well Your CV Fits the Job</div>", unsafe_allow_html=True)
-
-    # Let user update or keep both CV & JD
     update_or_keep_cv_jd()
-
     cv_text = st.session_state.cv_text
     jd_text = st.session_state.jd_text
-
     if cv_text and jd_text:
         st.write("---")
         if st.button("Run Fit Analysis", key="run_fit_analysis"):
             with st.spinner("Calculating fit analysis..."):
                 try:
-                    prompt = FIT_ANALYSIS_PROMPT.format(
-                        cv_text=cv_text, 
-                        jd_text=jd_text, 
-                        language=st.session_state.language
-                    )
+                    prompt = FIT_ANALYSIS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
                     response = client.chat.completions.create(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
@@ -598,13 +794,13 @@ elif st.session_state.step == 3:
                     result = response.choices[0].message.content.strip()
                     if result and len(result) > 20:
                         st.session_state.fit_analysis = result
+                        record_module_run("Module 3")
                     else:
                         st.error("Fit Analysis returned an unexpected result.")
                 except Exception as e:
                     st.error(f"Error during fit analysis: {e}")
     else:
         st.warning("Please ensure both CV and JD are provided before running Fit Analysis.")
-
     if st.session_state.get("fit_analysis"):
         st.markdown("### Fit Analysis & Tips")
         render_card(st.session_state.fit_analysis)
@@ -612,29 +808,21 @@ elif st.session_state.step == 3:
             st.session_state.step = 4
             st.rerun()
 
-# -------------------------------
-# Module 4: CV Improvement Suggestions
-# -------------------------------
 elif st.session_state.step == 4:
-    st.header("Module 4: CV Improvement Suggestions")
+    if not can_run_module("Module 4"):
+        st.error("Access blocked: You have reached your allowed runs for Module 4. Please upgrade for more runs.")
+        st.stop()
+    st.title("Module 4: CV Improvement Suggestions")
     st.markdown("<div class='module-title'>Get Actionable Suggestions to Reframe Your CV</div>", unsafe_allow_html=True)
-
-    # Let user update or keep both CV & JD
     update_or_keep_cv_jd()
-
     cv_text = st.session_state.cv_text
     jd_text = st.session_state.jd_text
-
     if cv_text and jd_text:
         st.write("---")
         if st.button("Generate CV Improvement Suggestions", key="run_cvimp"):
             with st.spinner("Generating suggestions..."):
                 try:
-                    prompt = CV_ENHANCEMENT_PROMPT.format(
-                        cv_text=cv_text, 
-                        jd_text=jd_text, 
-                        language=st.session_state.language
-                    )
+                    prompt = CV_ENHANCEMENT_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
                     response = client.chat.completions.create(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
@@ -644,13 +832,13 @@ elif st.session_state.step == 4:
                     result = response.choices[0].message.content.strip()
                     if result and len(result) > 20:
                         st.session_state.cv_improvement = result
+                        record_module_run("Module 4")
                     else:
                         st.error("CV Improvement Suggestions returned an unexpected result.")
                 except Exception as e:
                     st.error(f"Error generating suggestions: {e}")
     else:
         st.warning("Please ensure both CV and JD are provided before generating suggestions.")
-
     if st.session_state.cv_improvement:
         st.markdown("### CV Improvement Suggestions")
         render_card(st.session_state.cv_improvement)
@@ -658,29 +846,21 @@ elif st.session_state.step == 4:
             st.session_state.step = 5
             st.rerun()
 
-# -------------------------------
-# Module 5: Interview Questions & Guidance
-# -------------------------------
 elif st.session_state.step == 5:
-    st.header("Module 5: Interview Questions & Guidance")
+    if not can_run_module("Module 5"):
+        st.error("Access blocked: You have reached your allowed runs for Module 5. Please upgrade for more runs.")
+        st.stop()
+    st.title("Module 5: Interview Questions & Guidance")
     st.markdown("<div class='module-title'>Generate Interview Questions Based on Your CV & JD</div>", unsafe_allow_html=True)
-
-    # Let user update or keep both CV & JD
     update_or_keep_cv_jd()
-
     cv_text = st.session_state.cv_text
     jd_text = st.session_state.jd_text
-
     if cv_text and jd_text:
         st.write("---")
         if st.button("Generate Interview Questions", key="gen_int_questions"):
             with st.spinner("Generating interview questions..."):
                 try:
-                    prompt = INTERVIEW_QUESTIONS_PROMPT.format(
-                        cv_text=cv_text, 
-                        jd_text=jd_text, 
-                        language=st.session_state.language
-                    )
+                    prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
                     messages = [{"role": "user", "content": prompt}]
                     functions = [{
                         "name": "get_interview_questions",
@@ -740,55 +920,45 @@ elif st.session_state.step == 5:
                         max_tokens=3000
                     )
                     message = response.choices[0].message
-
                     try:
                         if hasattr(message, "function_call") and message.function_call:
                             arguments = message.function_call.arguments
                         else:
                             arguments = message.content
-                        # Clean up newlines so we can parse safely
                         arguments_clean = arguments.replace("\n", "\\n")
                         parsed = json.loads(arguments_clean)
                         st.session_state.parsed_questions = parsed
                         st.session_state.interview_output = json.dumps(parsed, indent=2)
-
                         st.markdown("### Interview Questions by Category")
                         for category, qlist in parsed.items():
                             st.subheader(category)
                             questions_formatted = "<br>".join("- " + format_question(q)[0] for q in qlist)
                             render_card(questions_formatted)
-
+                        record_module_run("Module 5")
                     except Exception as pe:
                         st.error("Failed to parse interview questions into JSON. Raw output: " + arguments)
                         st.session_state.parsed_questions = {}
-
                 except Exception as e:
                     st.error(f"Error generating interview questions: {e}")
     else:
         st.warning("Please ensure both CV and JD are provided before generating questions.")
-
     if st.session_state.interview_output:
         if st.button("Next: Practice Interview", key="go_module_6"):
             st.session_state.step = 6
             st.rerun()
 
-# -------------------------------
-# Module 6: Practice Interviewing
-# -------------------------------
 elif st.session_state.step == 6:
-    st.header("Module 6: Practice Interview")
+    if not can_run_module("Module 6"):
+        st.error("Access blocked: You have reached your allowed runs for Module 6. Please upgrade for more runs.")
+        st.stop()
+    st.title("Module 6: Practice Interview")
     st.markdown("<div class='module-title'>Practice Your Interview Skills</div>", unsafe_allow_html=True)
-
-    # Let user update or keep both CV & JD
     update_or_keep_cv_jd()
-
     st.write("---")
     if st.button("Regenerate Interview Questions", key="regen_questions6"):
         st.session_state.interview_output = None
         st.session_state.parsed_questions = {}
         st.rerun()
-
-    # Display the stored questions if available
     selected_question_obj = None
     if st.session_state.parsed_questions and isinstance(st.session_state.parsed_questions, dict):
         category = st.selectbox("Select question category", list(st.session_state.parsed_questions.keys()), key="practice_category")
@@ -801,7 +971,6 @@ elif st.session_state.step == 6:
             st.warning("No questions available in this category.")
     else:
         st.warning("No interview questions found. Please generate questions first.")
-
     custom_question = st.text_input("Or enter a custom question to practice (optional):", key="custom_question")
     if custom_question.strip():
         selected_question_obj = {
@@ -809,13 +978,11 @@ elif st.session_state.step == 6:
             "guidelines": "N/A",
             "fit_score": "N/A"
         }
-
     if selected_question_obj:
         summary, details = selected_question_obj.get("question"), selected_question_obj.get("guidelines")
         st.markdown(f"**Question:** {summary}")
         with st.expander("Show Question Details"):
             st.markdown(details)
-
         answer_method = st.radio("Choose answer input method:", ["Type Answer", "Record Audio"], key="answer_method")
         if answer_method == "Record Audio":
             audio_value = st.audio_input("Record a voice message", key="audio_recorder")
@@ -835,11 +1002,7 @@ elif st.session_state.step == 6:
                             if transcript and len(transcript.split()) >= 5:
                                 st.markdown("**Transcribed Answer:**")
                                 st.write(transcript)
-                                feedback_prompt = FEEDBACK_PROMPT.format(
-                                    question=summary, 
-                                    answer=transcript, 
-                                    language=st.session_state.language
-                                )
+                                feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=transcript, language=st.session_state.language)
                                 feedback_response = client.chat.completions.create(
                                     model="gpt-4o",
                                     messages=[
@@ -852,11 +1015,11 @@ elif st.session_state.step == 6:
                                 feedback = feedback_response.choices[0].message.content
                                 st.markdown("**Feedback on Your Answer:**")
                                 st.markdown(feedback, unsafe_allow_html=True)
+                                record_module_run("Module 6")
                             else:
                                 st.error("Your transcribed answer is too short to evaluate.")
                         except Exception as e:
                             st.error(f"Error during transcription/feedback: {e}")
-
         else:
             typed_answer = st.text_area("Type your answer here:", key="typed_answer")
             if st.button("Submit Typed Answer", key="submit_answer_typed"):
@@ -865,11 +1028,7 @@ elif st.session_state.step == 6:
                     st.write(typed_answer)
                     with st.spinner("Generating feedback..."):
                         try:
-                            feedback_prompt = FEEDBACK_PROMPT.format(
-                                question=summary, 
-                                answer=typed_answer, 
-                                language=st.session_state.language
-                            )
+                            feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=typed_answer, language=st.session_state.language)
                             feedback_response = client.chat.completions.create(
                                 model="gpt-4o",
                                 messages=[
@@ -882,11 +1041,11 @@ elif st.session_state.step == 6:
                             feedback = feedback_response.choices[0].message.content
                             st.markdown("**Feedback on Your Answer:**")
                             st.markdown(feedback, unsafe_allow_html=True)
+                            record_module_run("Module 6")
                         except Exception as e:
                             st.error(f"Error generating feedback: {e}")
                 else:
                     st.warning("Please type at least a few words to get meaningful feedback.")
-
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Back to Interview Prep", key="back_practice"):
@@ -895,9 +1054,9 @@ elif st.session_state.step == 6:
     with col3:
         if st.button("Start Over", key="restart_practice"):
             for key in list(st.session_state.keys()):
-                if key not in ["logged_in", "language"]:
+                if key not in ["user", "auth_page", "customer_email", "page"]:
                     st.session_state.pop(key)
             st.session_state.step = 0
+            st.session_state.page = "landing"
             st.rerun()
-
 
