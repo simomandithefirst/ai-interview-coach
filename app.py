@@ -15,13 +15,6 @@ import tempfile
 import base64
 
 # -------------------------------
-# Helper: Get base64 of file for background image
-# -------------------------------
-def get_base64_of_file(file_path):
-    with open(file_path, "rb") as f:
-        return base64.b64encode(f.read()).decode()
-
-# -------------------------------
 # Load configuration from st.secrets
 # -------------------------------
 config = st.secrets
@@ -665,28 +658,6 @@ def show_module_instructions(module_title, instructions):
 # -------------------------------
 st.set_page_config(page_title="Career Catalyst", layout="wide")
 
-# Read and encode the background image
-bg_image = get_base64_of_file("background/image.png")
-st.markdown(
-    f"""
-    <style>
-    body {{
-        background-image: url("data:image/png;base64,{bg_image}");
-        background-size: cover;
-        background-attachment: fixed;
-        font-family: 'Segoe UI', sans-serif; 
-        color: #2c3e50; 
-    }}
-    .main, .stApp {{ background: #ffffff; border-radius: 10px; padding: 30px 20px; }}
-    header, footer {{ visibility: hidden; }}
-    h1, h2, h3 {{ text-align: center; margin-top: 0; color: #2c3e50; }}
-    .module-title {{ color: #2c3e50; border-bottom: 2px solid #d4af37; margin-bottom: 10px; padding-bottom: 5px; text-transform: uppercase; text-align: center; }}
-    .card {{ background-color: #ffffff; border: 2px solid #d4af37; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }}
-    .upgrade-box {{ background-color: #e7f0fd; border: 2px solid #4a90e2; border-radius: 10px; padding: 20px; margin: 10px; }}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
 
 # -------------------------------
 # Session State Initialization for Main App
