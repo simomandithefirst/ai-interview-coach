@@ -237,10 +237,10 @@ def signup_user(email, password):
         return None
 
 def logout_user():
-    st.session_state.user = None
-    st.session_state.customer_email = ""
-    st.session_state.auth_page = "login"
-    st.session_state.page = "landing"
+    # Set the "user" key to None and reset related keys
+    st.session_state["user"] = None
+    st.session_state["auth_page"] = "login"
+    st.session_state["page"] = "landing"
     st.rerun()
 
 # -------------------------------
@@ -261,9 +261,14 @@ def store_user_in_db(user, email):
 # Firebase Admin Helper Functions for Usage & Subscription
 # -------------------------------
 def get_user_data():
-    user_id = st.session_state.user["localId"]
+    user = st.session_state.get("user")
+    if not user:
+        return {}
+    user_id = user.get("localId")
+    if not user_id:
+        return {}
     ref = db.reference("users").child(user_id)
-    return ref.get()
+    return ref.get() or {}
 
 def record_module_run(module_name):
     user_id = st.session_state.user["localId"]
@@ -307,7 +312,6 @@ def get_left_runs(module_name):
     return 0
 
 def update_tier_after_payment(plan):
-    # When a logged-in user upgrades, reset all usage counters
     expiry_date = datetime.now() + SIX_MONTHS
     user_id = st.session_state.user["localId"]
     usage_init = reset_usage()
@@ -619,11 +623,8 @@ client = OpenAI(api_key=openai_api_key)
 # -------------------------------
 def buy_package_button(label, price_id, purchase_plan):
     if st.session_state.customer_email:
-        # Get current subscription package
         user_data = get_user_data()
         current_plan = user_data.get("subscription", {}).get("package", "free")
-        
-        # If user is on Ultimate and trying to buy Pro, show a warning and confirmation button.
         if purchase_plan == "pro" and current_plan == "ultimate":
             st.warning("You are currently on the Ultimate plan. Switching to the Pro package will cause you to lose access to Ultimate advantages.")
             if st.button(f"Confirm Downgrade to {label}", key=f"confirm_{purchase_plan}"):
@@ -690,10 +691,49 @@ if "show_upgrade" not in st.session_state:
     st.session_state.show_upgrade = False
 
 # -------------------------------
+# Ensure user is logged in before proceeding
+# -------------------------------
+if st.session_state.get("user") is None:
+    if st.session_state.get("auth_page", "login") == "login":
+        # Show login page and stop execution
+        def login_page():
+            st.title("Login")
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            if st.button("Log In"):
+                user = login_user(email, password)
+                if user:
+                    st.session_state.user = user
+                    st.session_state.customer_email = email
+                    st.success("Logged in successfully!")
+                    st.rerun()
+            st.markdown("Don't have an account?")
+            if st.button("Go to Sign Up"):
+                st.session_state.auth_page = "signup"
+                st.rerun()
+        login_page()
+        st.stop()
+    else:
+        def signup_page():
+            st.title("Sign Up")
+            email = st.text_input("Email", key="signup_email")
+            password = st.text_input("Password", type="password", key="signup_password")
+            if st.button("Sign Up"):
+                user = signup_user(email, password)
+                if user:
+                    st.session_state.auth_page = "login"
+                    st.rerun()
+            st.markdown("Already have an account?")
+            if st.button("Go to Log In"):
+                st.session_state.auth_page = "login"
+                st.rerun()
+        signup_page()
+        st.stop()
+
+# -------------------------------
 # Sidebar Navigation with Logout, Settings, and Start Button
 # -------------------------------
 with st.sidebar:
-    # Show Start button only if the user hasn't started any module yet
     if st.session_state.step == 0:
         if st.button("Start"):
             st.session_state.step = 1
@@ -702,7 +742,6 @@ with st.sidebar:
     if st.button("Settings"):
         st.session_state.page = "settings"
         st.rerun()
-    # Existing module navigation if the user has started a module
     if st.session_state.step > 0:
         st.markdown("## Modules")
         modules = [
@@ -843,15 +882,12 @@ Whether you're applying for a job or preparing for an interview, our tools will 
     st.markdown("### Select Your Preferred Language")
     language = st.selectbox("Language", options=["English", "French", "Spanish"], key="language_select")
     st.session_state.language = language
-
-    # Fetch subscription info to conditionally display the free-tier message
     user_data = get_user_data()
     subscription = user_data.get("subscription", {"package": "free", "expiry": None})
     if subscription["package"] == "free":
         st.info("Enjoy our free tier – no payment required to get started!")
     else:
         st.info(f"You are currently on the {subscription['package'].capitalize()} plan. Enjoy your enhanced access!")
-        
     if st.button("Get Started"):
         st.session_state.step = 1
         st.rerun()
@@ -1127,7 +1163,7 @@ elif st.session_state.step == 6:
     st.markdown("<div class='module-title'>Practice Your Interview Skills</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
     st.write("---")
-    # Regenerate Interview Questions button with warning and module run counting as Module 5
+    # Regenerate Interview Questions button with warning (counts as a Module 5 run)
     if st.button("Regenerate Interview Questions", key="regen_questions6"):
         st.warning("Warning: Regenerating interview questions will count as a run of Module 5.")
         if st.session_state.cv_text and st.session_state.jd_text:
