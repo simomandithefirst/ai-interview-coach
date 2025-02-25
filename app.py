@@ -63,16 +63,33 @@ def update_tier_by_checkout_session(session_id):
         users = users_ref.get() or {}
         for uid, user in users.items():
             if user.get("email", "").lower() == customer_email.lower():
-                expiry_date = datetime.now() + SIX_MONTHS
-                usage_init = reset_usage()
-                users_ref.child(uid).update({
-                    "subscription": {
-                        "package": purchase_plan,
-                        "expiry": expiry_date.isoformat()
-                    },
-                    "usage": usage_init
-                })
-                return True, purchase_plan, customer_email
+                current_plan = user.get("subscription", {}).get("package", "free")
+                if purchase_plan == "pro" and current_plan == "ultimate":
+                    st.warning("You are currently on the Ultimate plan. Switching to the Pro package will cause you to lose access to Ultimate advantages.")
+                    if st.button("Confirm Downgrade", key="confirm_downgrade_checkout"):
+                        expiry_date = datetime.now() + SIX_MONTHS
+                        usage_init = reset_usage()
+                        users_ref.child(uid).update({
+                            "subscription": {
+                                "package": purchase_plan,
+                                "expiry": expiry_date.isoformat()
+                            },
+                            "usage": usage_init
+                        })
+                        return True, purchase_plan, customer_email
+                    else:
+                        return False, None, customer_email
+                else:
+                    expiry_date = datetime.now() + SIX_MONTHS
+                    usage_init = reset_usage()
+                    users_ref.child(uid).update({
+                        "subscription": {
+                            "package": purchase_plan,
+                            "expiry": expiry_date.isoformat()
+                        },
+                        "usage": usage_init
+                    })
+                    return True, purchase_plan, customer_email
         return False, None, customer_email
     except Exception as e:
         st.error(f"Error updating subscription via checkout session: {e}")
@@ -427,6 +444,84 @@ def update_or_keep_cv_jd():
         pass
 
 # -------------------------------
+# Helper: Generate Interview Questions
+# -------------------------------
+def generate_interview_questions(cv_text, jd_text):
+    with st.spinner("Generating interview questions..."):
+        try:
+            prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
+            messages = [{"role": "user", "content": prompt}]
+            functions = [{
+                "name": "get_interview_questions",
+                "description": (
+                    "Return interview questions grouped by category in a JSON object. "
+                    "Each category's value is a list of question objects with keys 'question', 'guidelines', and 'fit_score'."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "Technical": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "guidelines": {"type": "string"},
+                                    "fit_score": {"type": "number"}
+                                },
+                                "required": ["question", "guidelines", "fit_score"]
+                            }
+                        },
+                        "Behavioral": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "guidelines": {"type": "string"},
+                                    "fit_score": {"type": "number"}
+                                },
+                                "required": ["question", "guidelines", "fit_score"]
+                            }
+                        },
+                        "CV Related": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "guidelines": {"type": "string"},
+                                    "fit_score": {"type": "number"}
+                                },
+                                "required": ["question", "guidelines", "fit_score"]
+                            }
+                        }
+                    },
+                    "required": ["Technical", "Behavioral", "CV Related"]
+                }
+            }]
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                functions=functions,
+                function_call="auto",
+                temperature=0.7,
+                max_tokens=3000
+            )
+            message = response.choices[0].message
+            if hasattr(message, "function_call") and message.function_call:
+                arguments = message.function_call.arguments
+            else:
+                arguments = message.content
+            arguments_clean = arguments.replace("\n", "\\n")
+            parsed = json.loads(arguments_clean)
+            st.session_state.parsed_questions = parsed
+            st.session_state.interview_output = json.dumps(parsed, indent=2)
+            st.success("Interview questions generated successfully!")
+        except Exception as e:
+            st.error(f"Error generating interview questions: {e}")
+
+# -------------------------------
 # Prompt Templates
 # -------------------------------
 CV_ANALYSIS_PROMPT = """Analyze the following CV and provide insightful observations that go beyond simply listing its content. 
@@ -520,6 +615,37 @@ Respond in {language}."""
 client = OpenAI(api_key=openai_api_key)
 
 # -------------------------------
+# Helper Functions for Upgrade and Module Instructions
+# -------------------------------
+def buy_package_button(label, price_id, purchase_plan):
+    if st.session_state.customer_email:
+        # Get current subscription package
+        user_data = get_user_data()
+        current_plan = user_data.get("subscription", {}).get("package", "free")
+        
+        # If user is on Ultimate and trying to buy Pro, show a warning and confirmation button.
+        if purchase_plan == "pro" and current_plan == "ultimate":
+            st.warning("You are currently on the Ultimate plan. Switching to the Pro package will cause you to lose access to Ultimate advantages.")
+            if st.button(f"Confirm Downgrade to {label}", key=f"confirm_{purchase_plan}"):
+                checkout_url = create_checkout_session(price_id, st.session_state.customer_email, purchase_plan)
+                if checkout_url:
+                    st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
+                    st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
+        else:
+            if st.button(f"Buy {label}", key=f"buy_{purchase_plan}"):
+                checkout_url = create_checkout_session(price_id, st.session_state.customer_email, purchase_plan)
+                if checkout_url:
+                    st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
+                    st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
+    else:
+        st.error("Please enter your email for upgrade.")
+
+def show_module_instructions(module_title, instructions):
+    with st.expander("Module Instructions"):
+        st.markdown(f"#### {module_title}")
+        st.markdown(instructions)
+
+# -------------------------------
 # Global CSS and Page Configuration
 # -------------------------------
 st.set_page_config(page_title="Career Catalyst", layout="wide")
@@ -564,49 +690,6 @@ if "show_upgrade" not in st.session_state:
     st.session_state.show_upgrade = False
 
 # -------------------------------
-# Authentication Pages
-# -------------------------------
-def login_page():
-    st.title("Login")
-    email = st.text_input("Email", key="login_email")
-    password = st.text_input("Password", type="password", key="login_password")
-    if st.button("Log In"):
-        user = login_user(email, password)
-        if user:
-            st.session_state.user = user
-            st.session_state.customer_email = email
-            st.success("Logged in successfully!")
-            st.rerun()
-    st.markdown("Don't have an account?")
-    if st.button("Go to Sign Up"):
-        st.session_state.auth_page = "signup"
-        st.rerun()
-
-def signup_page():
-    st.title("Sign Up")
-    email = st.text_input("Email", key="signup_email")
-    password = st.text_input("Password", type="password", key="signup_password")
-    if st.button("Sign Up"):
-        user = signup_user(email, password)
-        if user:
-            st.session_state.auth_page = "login"
-            st.rerun()
-    st.markdown("Already have an account?")
-    if st.button("Go to Log In"):
-        st.session_state.auth_page = "login"
-        st.rerun()
-
-# -------------------------------
-# Show Authentication if Not Logged In
-# -------------------------------
-if st.session_state.user is None:
-    if st.session_state.auth_page == "login":
-        login_page()
-    else:
-        signup_page()
-    st.stop()
-
-# -------------------------------
 # Sidebar Navigation with Logout, Settings, and Start Button
 # -------------------------------
 with st.sidebar:
@@ -636,6 +719,64 @@ with st.sidebar:
                 st.session_state.step = mod_num
                 st.session_state.page = "landing"
                 st.rerun()
+    st.markdown("---")
+    if st.button("Legal Mentions", key="legal_mentions"):
+        st.session_state.page = "legal"
+        st.rerun()
+    if st.button("Contact Us", key="contact_us"):
+        st.session_state.page = "contact"
+        st.rerun()
+    if st.button("About Us", key="about_us"):
+        st.session_state.page = "about"
+        st.rerun()
+
+# -------------------------------
+# Legal Mentions Page
+# -------------------------------
+if st.session_state.page == "legal":
+    st.title("Legal Mentions")
+    st.markdown("""
+**Legal Mentions**  
+This service is provided by Career Catalyst and is subject to French law. All information provided on this platform is for informational purposes only and does not constitute legal advice. Please consult a legal professional for advice tailored to your situation.  
+*© Career Catalyst. All rights reserved.*
+    """)
+    if st.button("Back to Landing"):
+         st.session_state.page = "landing"
+         st.rerun()
+    st.stop()
+
+# -------------------------------
+# Contact Us Page
+# -------------------------------
+if st.session_state.page == "contact":
+    st.title("Contact Us")
+    st.markdown("For any inquiries or support, please email: [careercatalysthelpdesk@gmail.com](mailto:careercatalysthelpdesk@gmail.com)")
+    if st.button("Back to Landing"):
+         st.session_state.page = "landing"
+         st.rerun()
+    st.stop()
+
+# -------------------------------
+# About Us Page
+# -------------------------------
+if st.session_state.page == "about":
+    st.title("About Us")
+    st.markdown("""
+Career Catalyst is a comprehensive career enhancement platform designed to help job seekers optimize their CVs, understand job descriptions, assess their fit for roles, and prepare for interviews.
+
+**Our Capabilities:**
+- **CV Analysis:** Detailed insights on your CV, highlighting strengths and areas for improvement.
+- **Job Analysis:** In-depth breakdown of job descriptions to help you tailor your applications.
+- **Fit Analysis:** An evaluation of how well your profile matches job requirements.
+- **CV Improvement Suggestions:** Actionable recommendations to optimize your CV.
+- **Interview Preparation:** Custom interview questions and real-time feedback to boost your interview performance.
+
+For more information or support, please contact us at [careercatalysthelpdesk@gmail.com](mailto:careercatalysthelpdesk@gmail.com).
+    """)
+    if st.button("Back to Landing"):
+         st.session_state.page = "landing"
+         st.rerun()
+    st.stop()
 
 # -------------------------------
 # Settings Page with Upgrade Options
@@ -674,28 +815,14 @@ if st.session_state.page == "settings":
         st.markdown("### Pro Package")
         st.markdown("**Price:** $11.99 (One-time)")
         st.markdown("**Benefit:** 100 runs per module for 6 months")
-        if st.button("Buy Pro Package"):
-            if st.session_state.customer_email:
-                checkout_url = create_checkout_session(PRO_PRICE_ID, st.session_state.customer_email, "pro")
-                if checkout_url:
-                    st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
-                    st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
-            else:
-                st.error("Please enter your email for upgrade.")
+        buy_package_button("Pro Package", PRO_PRICE_ID, "pro")
         st.markdown("</div>", unsafe_allow_html=True)
     with col2:
         st.markdown("<div class='upgrade-box'>", unsafe_allow_html=True)
         st.markdown("### Ultimate Package")
         st.markdown("**Price:** $29.99 (One-time)")
         st.markdown("**Benefit:** Unlimited runs per module for 6 months")
-        if st.button("Buy Ultimate Package"):
-            if st.session_state.customer_email:
-                checkout_url = create_checkout_session(ULTIMATE_PRICE_ID, st.session_state.customer_email, "ultimate")
-                if checkout_url:
-                    st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
-                    st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
-            else:
-                st.error("Please enter your email for upgrade.")
+        buy_package_button("Ultimate Package", ULTIMATE_PRICE_ID, "ultimate")
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
@@ -744,37 +871,24 @@ Whether you're applying for a job or preparing for an interview, our tools will 
             st.markdown("### Pro Package")
             st.markdown("**Price:** $11.99 (One-time)")
             st.markdown("**Benefit:** 100 runs per module for 6 months")
-            if st.button("Buy Pro Package"):
-                if st.session_state.customer_email:
-                    checkout_url = create_checkout_session(PRO_PRICE_ID, st.session_state.customer_email, "pro")
-                    if checkout_url:
-                        st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
-                        st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
-                else:
-                    st.error("Please enter your email for upgrade.")
+            buy_package_button("Pro Package", PRO_PRICE_ID, "pro")
             st.markdown("</div>", unsafe_allow_html=True)
         with col2:
             st.markdown("<div class='upgrade-box'>", unsafe_allow_html=True)
             st.markdown("### Ultimate Package")
             st.markdown("**Price:** $29.99 (One-time)")
             st.markdown("**Benefit:** Unlimited runs per module for 6 months")
-            if st.button("Buy Ultimate Package"):
-                if st.session_state.customer_email:
-                    checkout_url = create_checkout_session(ULTIMATE_PRICE_ID, st.session_state.customer_email, "ultimate")
-                    if checkout_url:
-                        st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
-                        st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
-                else:
-                    st.error("Please enter your email for upgrade.")
+            buy_package_button("Ultimate Package", ULTIMATE_PRICE_ID, "ultimate")
             st.markdown("</div>", unsafe_allow_html=True)
 
 # -------------------------------
 # Module Pages (Modules 1-6)
 # -------------------------------
 if st.session_state.step == 1:
-    if not can_run_module("Module 1"):
-        st.error("Access blocked: You have reached your allowed runs for Module 1. Please upgrade for more runs.")
-        st.stop()
+    show_module_instructions(
+        "Module 1: CV Analysis", 
+        "Upload your CV in PDF format. This module analyzes your CV to identify your unique strengths and areas for improvement. Use the feedback to optimize your resume for your job search."
+    )
     st.title("Module 1: CV Analysis")
     st.markdown("<div class='module-title'>Upload Your CV (PDF) for Analysis</div>", unsafe_allow_html=True)
     if not st.session_state.cv_text:
@@ -824,9 +938,10 @@ if st.session_state.step == 1:
             st.rerun()
 
 elif st.session_state.step == 2:
-    if not can_run_module("Module 2"):
-        st.error("Access blocked: You have reached your allowed runs for Module 2. Please upgrade for more runs.")
-        st.stop()
+    show_module_instructions(
+        "Module 2: Job Analysis", 
+        "Provide a job description by either scraping a URL or pasting it manually. The module will extract key requirements and challenges from the job posting."
+    )
     st.title("Module 2: Job Analysis")
     st.markdown("<div class='module-title'>Provide the Job Description</div>", unsafe_allow_html=True)
     if not st.session_state.jd_text:
@@ -897,9 +1012,10 @@ elif st.session_state.step == 2:
             st.rerun()
 
 elif st.session_state.step == 3:
-    if not can_run_module("Module 3"):
-        st.error("Access blocked: You have reached your allowed runs for Module 3. Please upgrade for more runs.")
-        st.stop()
+    show_module_instructions(
+        "Module 3: Fit Analysis & Tips", 
+        "This module compares your CV with the job description to generate a fit score along with actionable tips to improve your application."
+    )
     st.title("Module 3: Fit Analysis & Tips")
     st.markdown("<div class='module-title'>Let's See How Well Your CV Fits the Job</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
@@ -935,9 +1051,10 @@ elif st.session_state.step == 3:
             st.rerun()
 
 elif st.session_state.step == 4:
-    if not can_run_module("Module 4"):
-        st.error("Access blocked: You have reached your allowed runs for Module 4. Please upgrade for more runs.")
-        st.stop()
+    show_module_instructions(
+        "Module 4: CV Improvement Suggestions", 
+        "Receive actionable suggestions to reframe your CV so it better aligns with the job description. You can also choose to update your CV within this module."
+    )
     st.title("Module 4: CV Improvement Suggestions")
     st.markdown("<div class='module-title'>Get Actionable Suggestions to Reframe Your CV</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
@@ -973,9 +1090,10 @@ elif st.session_state.step == 4:
             st.rerun()
 
 elif st.session_state.step == 5:
-    if not can_run_module("Module 5"):
-        st.error("Access blocked: You have reached your allowed runs for Module 5. Please upgrade for more runs.")
-        st.stop()
+    show_module_instructions(
+        "Module 5: Interview Questions & Guidance", 
+        "Generate tailored interview questions based on your CV and job description. The questions are grouped into Technical, Behavioral, and CV Related categories to help you prepare comprehensively."
+    )
     st.title("Module 5: Interview Questions & Guidance")
     st.markdown("<div class='module-title'>Generate Interview Questions Based on Your CV & JD</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
@@ -984,88 +1102,15 @@ elif st.session_state.step == 5:
     if cv_text and jd_text:
         st.write("---")
         if st.button("Generate Interview Questions", key="gen_int_questions"):
-            with st.spinner("Generating interview questions..."):
-                try:
-                    prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
-                    messages = [{"role": "user", "content": prompt}]
-                    functions = [{
-                        "name": "get_interview_questions",
-                        "description": (
-                            "Return interview questions grouped by category in a JSON object. "
-                            "Each category's value is a list of question objects with keys 'question', 'guidelines', and 'fit_score'."
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "Technical": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "question": {"type": "string"},
-                                            "guidelines": {"type": "string"},
-                                            "fit_score": {"type": "number"}
-                                        },
-                                        "required": ["question", "guidelines", "fit_score"]
-                                    }
-                                },
-                                "Behavioral": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "question": {"type": "string"},
-                                            "guidelines": {"type": "string"},
-                                            "fit_score": {"type": "number"}
-                                        },
-                                        "required": ["question", "guidelines", "fit_score"]
-                                    }
-                                },
-                                "CV Related": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "question": {"type": "string"},
-                                            "guidelines": {"type": "string"},
-                                            "fit_score": {"type": "number"}
-                                        },
-                                        "required": ["question", "guidelines", "fit_score"]
-                                    }
-                                }
-                            },
-                            "required": ["Technical", "Behavioral", "CV Related"]
-                        }
-                    }]
-                    response = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=messages,
-                        functions=functions,
-                        function_call="auto",
-                        temperature=0.7,
-                        max_tokens=3000
-                    )
-                    message = response.choices[0].message
-                    try:
-                        if hasattr(message, "function_call") and message.function_call:
-                            arguments = message.function_call.arguments
-                        else:
-                            arguments = message.content
-                        arguments_clean = arguments.replace("\n", "\\n")
-                        parsed = json.loads(arguments_clean)
-                        st.session_state.parsed_questions = parsed
-                        st.session_state.interview_output = json.dumps(parsed, indent=2)
-                        st.markdown("### Interview Questions by Category")
-                        for category, qlist in parsed.items():
-                            st.subheader(category)
-                            questions_formatted = "<br>".join("- " + format_question(q)[0] for q in qlist)
-                            render_card(questions_formatted)
-                        record_module_run("Module 5")
-                    except Exception as pe:
-                        st.error("Failed to parse interview questions into JSON. Raw output: " + arguments)
-                        st.session_state.parsed_questions = {}
-                except Exception as e:
-                    st.error(f"Error generating interview questions: {e}")
+            generate_interview_questions(cv_text, jd_text)
+        if st.session_state.interview_output:
+            st.markdown("### Interview Questions by Category")
+            parsed = st.session_state.parsed_questions
+            for category, qlist in parsed.items():
+                st.subheader(category)
+                questions_formatted = "<br>".join("- " + format_question(q)[0] for q in qlist)
+                render_card(questions_formatted)
+            record_module_run("Module 5")
     else:
         st.warning("Please ensure both CV and JD are provided before generating questions.")
     if st.session_state.interview_output:
@@ -1074,17 +1119,23 @@ elif st.session_state.step == 5:
             st.rerun()
 
 elif st.session_state.step == 6:
-    if not can_run_module("Module 6"):
-        st.error("Access blocked: You have reached your allowed runs for Module 6. Please upgrade for more runs.")
-        st.stop()
+    show_module_instructions(
+        "Module 6: Practice Interview", 
+        "Practice your interview skills by answering generated or custom questions. Receive real-time feedback on your responses to help you improve."
+    )
     st.title("Module 6: Practice Interview")
     st.markdown("<div class='module-title'>Practice Your Interview Skills</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
     st.write("---")
+    # Regenerate Interview Questions button with warning and module run counting as Module 5
     if st.button("Regenerate Interview Questions", key="regen_questions6"):
-        st.session_state.interview_output = None
-        st.session_state.parsed_questions = {}
-        st.rerun()
+        st.warning("Warning: Regenerating interview questions will count as a run of Module 5.")
+        if st.session_state.cv_text and st.session_state.jd_text:
+            generate_interview_questions(st.session_state.cv_text, st.session_state.jd_text)
+            record_module_run("Module 5")
+            st.rerun()
+        else:
+            st.error("Please ensure both CV and JD are provided.")
     selected_question_obj = None
     if st.session_state.parsed_questions and isinstance(st.session_state.parsed_questions, dict):
         category = st.selectbox("Select question category", list(st.session_state.parsed_questions.keys()), key="practice_category")
