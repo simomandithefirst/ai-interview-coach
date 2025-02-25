@@ -10,17 +10,18 @@ from datetime import datetime, timedelta
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, auth, db
-import stripe  # Import Stripe
+import stripe
+import tempfile
 
 # -------------------------------
 # Load configuration from st.secrets
 # -------------------------------
 config = st.secrets
+APP_URL = config.get("APP_URL", "http://localhost:8501/")
 
 # -------------------------------
 # Load API Keys & Credentials from st.secrets
 # -------------------------------
-# OpenAI & APP_USERS
 openai_api_key = config.get("OPENAI_API_KEY")
 app_users_json = config.get("APP_USERS")
 if not openai_api_key:
@@ -36,11 +37,75 @@ if not STRIPE_API_KEY or not PRO_PRICE_ID or not ULTIMATE_PRICE_ID:
     st.stop()
 
 # -------------------------------
-# Define checkout session creation function
+# Helper: Reset usage for all modules
+# -------------------------------
+def reset_usage():
+    return {
+        "Module 1": 0,
+        "Module 2": 0,
+        "Module 3": 0,
+        "Module 4": 0,
+        "Module 5": 0,
+        "Module 6": 0,
+    }
+
+# -------------------------------
+# Helper: Update subscription using Stripe session data
+# -------------------------------
+SIX_MONTHS = timedelta(days=180)
+def update_tier_by_checkout_session(session_id):
+    try:
+        session = stripe.checkout.Session.retrieve(session_id)
+        purchase_plan = session.metadata.get("purchase_plan", "free")
+        customer_email = session.customer_email
+        # Look up the user in Firebase by matching the email.
+        users_ref = db.reference("users")
+        users = users_ref.get() or {}
+        for uid, user in users.items():
+            if user.get("email", "").lower() == customer_email.lower():
+                expiry_date = datetime.now() + SIX_MONTHS
+                usage_init = reset_usage()
+                users_ref.child(uid).update({
+                    "subscription": {
+                        "package": purchase_plan,
+                        "expiry": expiry_date.isoformat()
+                    },
+                    "usage": usage_init
+                })
+                return True, purchase_plan, customer_email
+        return False, None, customer_email
+    except Exception as e:
+        st.error(f"Error updating subscription via checkout session: {e}")
+        return False, None, None
+
+# -------------------------------
+# Check Query Parameters for Payment Status using st.query_params
+# -------------------------------
+if "status" in st.query_params:
+    status = st.query_params["status"]
+    if status == "success":
+        st.success("Payment successful!")
+        session_id = st.query_params.get("session_id")
+        if session_id:
+            updated, plan, customer_email = update_tier_by_checkout_session(session_id)
+            if updated:
+                st.success(f"Subscription upgraded to {plan.capitalize()} for {customer_email}! All usage counters have been reset.")
+            else:
+                st.info("Payment completed. Please log in with the same email to see your upgraded subscription.")
+        st.query_params.clear()  # Clear query parameters from the URL
+        st.rerun()
+    elif status == "cancel":
+        st.warning("Payment failed or was cancelled.")
+        st.session_state.step = 0
+        st.session_state.page = "landing"
+        st.query_params.clear()
+        st.rerun()
+
+# -------------------------------
+# Define checkout session creation function (with metadata)
 # -------------------------------
 stripe.api_key = STRIPE_API_KEY
-
-def create_checkout_session(price_id, customer_email):
+def create_checkout_session(price_id, customer_email, purchase_plan):
     try:
         session = stripe.checkout.Session.create(
             payment_method_types=['card'],
@@ -50,8 +115,9 @@ def create_checkout_session(price_id, customer_email):
                 'quantity': 1,
             }],
             customer_email=customer_email,
-            success_url="https://your-app-success-url.com",  # Update with your success URL
-            cancel_url="https://your-app-cancel-url.com",    # Update with your cancel URL
+            success_url=f"{APP_URL}?status=success&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{APP_URL}?status=cancel",
+            metadata={"purchase_plan": purchase_plan}
         )
         return session.url
     except Exception as e:
@@ -83,15 +149,10 @@ if not firebase_admin_creds:
     st.error("FIREBASE_ADMIN_CREDENTIALS not set in st.secrets.")
     st.stop()
 
-# Convert to a plain dict if necessary
 firebase_admin_creds = dict(firebase_admin_creds)
-
-# Ensure the private key is correctly formatted
 if "\\n" in firebase_admin_creds.get("private_key", ""):
     firebase_admin_creds["private_key"] = firebase_admin_creds["private_key"].replace("\\n", "\n")
 
-# Write the cleaned credentials to a temporary JSON file
-import tempfile
 try:
     with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".json") as temp_file:
         json.dump(firebase_admin_creds, temp_file)
@@ -170,14 +231,7 @@ def logout_user():
 # -------------------------------
 def store_user_in_db(user, email):
     ref = db.reference("users")
-    usage_init = {
-         "Module 1": 0,
-         "Module 2": 0,
-         "Module 3": 0,
-         "Module 4": 0,
-         "Module 5": 0,
-         "Module 6": 0,
-    }
+    usage_init = reset_usage()
     subscription_init = {"package": "free", "expiry": None}
     ref.child(user["localId"]).set({
          "email": email,
@@ -235,15 +289,19 @@ def get_left_runs(module_name):
         return "Unlimited"
     return 0
 
-SIX_MONTHS = timedelta(days=180)
 def update_tier_after_payment(plan):
+    # When a logged-in user upgrades, reset all usage counters
     expiry_date = datetime.now() + SIX_MONTHS
     user_id = st.session_state.user["localId"]
-    db.reference("users").child(user_id).child("subscription").set({
-         "package": plan,
-         "expiry": expiry_date.isoformat()
+    usage_init = reset_usage()
+    db.reference("users").child(user_id).update({
+         "subscription": {
+             "package": plan,
+             "expiry": expiry_date.isoformat()
+         },
+         "usage": usage_init
     })
-    st.success(f"Successfully upgraded to {plan.capitalize()}! Access valid until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.success(f"Successfully upgraded to {plan.capitalize()}! All module usage has been reset and access is valid until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # -------------------------------
 # Utility Functions (PDF extraction, scraping, etc.)
@@ -549,13 +607,19 @@ if st.session_state.user is None:
     st.stop()
 
 # -------------------------------
-# Sidebar Navigation with Logout using on_click callback
+# Sidebar Navigation with Logout, Settings, and Start Button
 # -------------------------------
 with st.sidebar:
+    # Show Start button only if the user hasn't started any module yet
+    if st.session_state.step == 0:
+        if st.button("Start"):
+            st.session_state.step = 1
+            st.rerun()
     st.button("Logout", on_click=logout_user)
     if st.button("Settings"):
         st.session_state.page = "settings"
         st.rerun()
+    # Existing module navigation if the user has started a module
     if st.session_state.step > 0:
         st.markdown("## Modules")
         modules = [
@@ -572,13 +636,6 @@ with st.sidebar:
                 st.session_state.step = mod_num
                 st.session_state.page = "landing"
                 st.rerun()
-        if st.button("Reset App", use_container_width=True):
-            for key in list(st.session_state.keys()):
-                if key not in ["user", "auth_page", "customer_email", "page"]:
-                    st.session_state.pop(key)
-            st.session_state.step = 0
-            st.session_state.page = "landing"
-            st.rerun()
 
 # -------------------------------
 # Settings Page with Upgrade Options
@@ -588,7 +645,6 @@ if st.session_state.page == "settings":
     if st.button("← Back to Landing"):
         st.session_state.page = "landing"
         st.rerun()
-
     user_data = get_user_data()
     subscription = user_data.get("subscription", {"package": "free", "expiry": None})
     package = subscription.get("package", "free")
@@ -620,7 +676,7 @@ if st.session_state.page == "settings":
         st.markdown("**Benefit:** 100 runs per module for 6 months")
         if st.button("Buy Pro Package"):
             if st.session_state.customer_email:
-                checkout_url = create_checkout_session(PRO_PRICE_ID, st.session_state.customer_email)
+                checkout_url = create_checkout_session(PRO_PRICE_ID, st.session_state.customer_email, "pro")
                 if checkout_url:
                     st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
                     st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
@@ -634,7 +690,7 @@ if st.session_state.page == "settings":
         st.markdown("**Benefit:** Unlimited runs per module for 6 months")
         if st.button("Buy Ultimate Package"):
             if st.session_state.customer_email:
-                checkout_url = create_checkout_session(ULTIMATE_PRICE_ID, st.session_state.customer_email)
+                checkout_url = create_checkout_session(ULTIMATE_PRICE_ID, st.session_state.customer_email, "ultimate")
                 if checkout_url:
                     st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
                     st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
@@ -661,15 +717,20 @@ Whether you're applying for a job or preparing for an interview, our tools will 
     language = st.selectbox("Language", options=["English", "French", "Spanish"], key="language_select")
     st.session_state.language = language
 
-    st.info("Enjoy our free tier – no payment required to get started!")
+    # Fetch subscription info to conditionally display the free-tier message
+    user_data = get_user_data()
+    subscription = user_data.get("subscription", {"package": "free", "expiry": None})
+    if subscription["package"] == "free":
+        st.info("Enjoy our free tier – no payment required to get started!")
+    else:
+        st.info(f"You are currently on the {subscription['package'].capitalize()} plan. Enjoy your enhanced access!")
+        
     if st.button("Get Started"):
         st.session_state.step = 1
         st.rerun()
-
     if st.button("View Upgrade Options"):
         st.session_state.show_upgrade = True
         st.rerun()
-
     if st.session_state.show_upgrade:
         st.markdown("## Upgrade Your Access (6-Month Access)")
         st.markdown("Upgrade to **Pro** (100 runs per module) or **Ultimate** (Unlimited runs) with a one‑time payment.")
@@ -685,7 +746,7 @@ Whether you're applying for a job or preparing for an interview, our tools will 
             st.markdown("**Benefit:** 100 runs per module for 6 months")
             if st.button("Buy Pro Package"):
                 if st.session_state.customer_email:
-                    checkout_url = create_checkout_session(PRO_PRICE_ID, st.session_state.customer_email)
+                    checkout_url = create_checkout_session(PRO_PRICE_ID, st.session_state.customer_email, "pro")
                     if checkout_url:
                         st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
                         st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
@@ -699,7 +760,7 @@ Whether you're applying for a job or preparing for an interview, our tools will 
             st.markdown("**Benefit:** Unlimited runs per module for 6 months")
             if st.button("Buy Ultimate Package"):
                 if st.session_state.customer_email:
-                    checkout_url = create_checkout_session(ULTIMATE_PRICE_ID, st.session_state.customer_email)
+                    checkout_url = create_checkout_session(ULTIMATE_PRICE_ID, st.session_state.customer_email, "ultimate")
                     if checkout_url:
                         st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
                         st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
