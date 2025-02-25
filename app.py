@@ -127,10 +127,7 @@ def create_checkout_session(price_id, customer_email, purchase_plan):
         session = stripe.checkout.Session.create(
             payment_method_types=['card'],
             mode='payment',
-            line_items=[{
-                'price': price_id,
-                'quantity': 1,
-            }],
+            line_items=[{'price': price_id, 'quantity': 1}],
             customer_email=customer_email,
             success_url=f"{APP_URL}?status=success&session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{APP_URL}?status=cancel",
@@ -165,11 +162,9 @@ firebase_admin_creds = config.get("FIREBASE_ADMIN_CREDENTIALS")
 if not firebase_admin_creds:
     st.error("FIREBASE_ADMIN_CREDENTIALS not set in st.secrets.")
     st.stop()
-
 firebase_admin_creds = dict(firebase_admin_creds)
 if "\\n" in firebase_admin_creds.get("private_key", ""):
     firebase_admin_creds["private_key"] = firebase_admin_creds["private_key"].replace("\\n", "\n")
-
 try:
     with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".json") as temp_file:
         json.dump(firebase_admin_creds, temp_file)
@@ -177,14 +172,11 @@ try:
 except Exception as e:
     st.error(f"Invalid Firebase Admin Credentials: {str(e)}")
     st.stop()
-
 admin_cred = credentials.Certificate(firebase_admin_creds)
 try:
     firebase_admin.get_app()
 except ValueError:
-    firebase_admin.initialize_app(admin_cred, {
-        "databaseURL": firebase_client_config.get("databaseURL")
-    })
+    firebase_admin.initialize_app(admin_cred, {"databaseURL": firebase_client_config.get("databaseURL")})
 
 # -------------------------------
 # Firebase Auth Functions (using REST API & Admin SDK)
@@ -194,18 +186,22 @@ FIREBASE_REST_API = "https://identitytoolkit.googleapis.com/v1"
 def login_user(email, password):
     api_key = firebase_config.get("API_KEY")
     url = f"{FIREBASE_REST_API}/accounts:signInWithPassword?key={api_key}"
-    payload = {
-        "email": email,
-        "password": password,
-        "returnSecureToken": True
-    }
+    payload = {"email": email, "password": password, "returnSecureToken": True}
     response = requests.post(url, json=payload)
     if response.status_code == 200:
         data = response.json()
         try:
-            decoded = auth.verify_id_token(data["idToken"])
+            # Verify token
+            auth.verify_id_token(data["idToken"])
+            # Fetch user record and check email verification status
+            user_record = auth.get_user_by_email(email)
+            if not user_record.email_verified:
+                st.error("Please verify your email before logging in.")
+                # Store token for resend purposes
+                st.session_state.unverified_id_token = data["idToken"]
+                return None
         except Exception as e:
-            st.error("Token verification failed.")
+            st.error("Error verifying email: " + str(e))
             return None
         return data
     else:
@@ -216,11 +212,7 @@ def login_user(email, password):
 def signup_user(email, password):
     api_key = firebase_config.get("API_KEY")
     url = f"{FIREBASE_REST_API}/accounts:signUp?key={api_key}"
-    payload = {
-        "email": email,
-        "password": password,
-        "returnSecureToken": True
-    }
+    payload = {"email": email, "password": password, "returnSecureToken": True}
     response = requests.post(url, json=payload)
     if response.status_code == 200:
         data = response.json()
@@ -230,17 +222,25 @@ def signup_user(email, password):
         except Exception as e:
             st.error("Failed to generate email verification link: " + str(e))
         store_user_in_db(data, email)
-        return data
+        st.info("Account created. Please verify your email before logging in.")
+        return None
     else:
         error_msg = response.json().get("error", {}).get("message", "Unknown error")
         st.error("Sign up failed: " + error_msg)
         return None
 
+def send_verification_email(idToken):
+    api_key = firebase_config.get("API_KEY")
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key={api_key}"
+    payload = {"requestType": "VERIFY_EMAIL", "idToken": idToken}
+    response = requests.post(url, json=payload)
+    if response.status_code == 200:
+        return True, response.json()
+    else:
+        return False, response.json()
+
 def logout_user():
-    # Set the "user" key to None and reset related keys
-    st.session_state["user"] = None
-    st.session_state["auth_page"] = "login"
-    st.session_state["page"] = "landing"
+    st.session_state.clear()
     st.rerun()
 
 # -------------------------------
@@ -316,10 +316,7 @@ def update_tier_after_payment(plan):
     user_id = st.session_state.user["localId"]
     usage_init = reset_usage()
     db.reference("users").child(user_id).update({
-         "subscription": {
-             "package": plan,
-             "expiry": expiry_date.isoformat()
-         },
+         "subscription": {"package": plan, "expiry": expiry_date.isoformat()},
          "usage": usage_init
     })
     st.success(f"Successfully upgraded to {plan.capitalize()}! All module usage has been reset and access is valid until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -695,7 +692,6 @@ if "show_upgrade" not in st.session_state:
 # -------------------------------
 if st.session_state.get("user") is None:
     if st.session_state.get("auth_page", "login") == "login":
-        # Show login page and stop execution
         def login_page():
             st.title("Login")
             email = st.text_input("Email", key="login_email")
@@ -705,8 +701,18 @@ if st.session_state.get("user") is None:
                 if user:
                     st.session_state.user = user
                     st.session_state.customer_email = email
+                    if "unverified_id_token" in st.session_state:
+                        del st.session_state.unverified_id_token
                     st.success("Logged in successfully!")
                     st.rerun()
+            # If unverified, show resend button
+            if "unverified_id_token" in st.session_state:
+                if st.button("Resend Verification Email", key="resend_verification"):
+                    success, result = send_verification_email(st.session_state.unverified_id_token)
+                    if success:
+                        st.success("Verification email sent!")
+                    else:
+                        st.error("Failed to send verification email: " + str(result))
             st.markdown("Don't have an account?")
             if st.button("Go to Sign Up"):
                 st.session_state.auth_page = "signup"
@@ -720,9 +726,9 @@ if st.session_state.get("user") is None:
             password = st.text_input("Password", type="password", key="signup_password")
             if st.button("Sign Up"):
                 user = signup_user(email, password)
-                if user:
-                    st.session_state.auth_page = "login"
-                    st.rerun()
+                if user is None:
+                    st.info("Please verify your email and then log in.")
+                st.rerun()
             st.markdown("Already have an account?")
             if st.button("Go to Log In"):
                 st.session_state.auth_page = "login"
@@ -921,10 +927,7 @@ Whether you're applying for a job or preparing for an interview, our tools will 
 # Module Pages (Modules 1-6)
 # -------------------------------
 if st.session_state.step == 1:
-    show_module_instructions(
-        "Module 1: CV Analysis", 
-        "Upload your CV in PDF format. This module analyzes your CV to identify your unique strengths and areas for improvement. Use the feedback to optimize your resume for your job search."
-    )
+    show_module_instructions("Module 1: CV Analysis", "Upload your CV in PDF format. This module analyzes your CV to identify your unique strengths and areas for improvement. Use the feedback to optimize your resume for your job search.")
     st.title("Module 1: CV Analysis")
     st.markdown("<div class='module-title'>Upload Your CV (PDF) for Analysis</div>", unsafe_allow_html=True)
     if not st.session_state.cv_text:
@@ -974,10 +977,7 @@ if st.session_state.step == 1:
             st.rerun()
 
 elif st.session_state.step == 2:
-    show_module_instructions(
-        "Module 2: Job Analysis", 
-        "Provide a job description by either scraping a URL or pasting it manually. The module will extract key requirements and challenges from the job posting."
-    )
+    show_module_instructions("Module 2: Job Analysis", "Provide a job description by either scraping a URL or pasting it manually. The module will extract key requirements and challenges from the job posting.")
     st.title("Module 2: Job Analysis")
     st.markdown("<div class='module-title'>Provide the Job Description</div>", unsafe_allow_html=True)
     if not st.session_state.jd_text:
@@ -1048,10 +1048,7 @@ elif st.session_state.step == 2:
             st.rerun()
 
 elif st.session_state.step == 3:
-    show_module_instructions(
-        "Module 3: Fit Analysis & Tips", 
-        "This module compares your CV with the job description to generate a fit score along with actionable tips to improve your application."
-    )
+    show_module_instructions("Module 3: Fit Analysis & Tips", "This module compares your CV with the job description to generate a fit score along with actionable tips to improve your application.")
     st.title("Module 3: Fit Analysis & Tips")
     st.markdown("<div class='module-title'>Let's See How Well Your CV Fits the Job</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
@@ -1087,10 +1084,7 @@ elif st.session_state.step == 3:
             st.rerun()
 
 elif st.session_state.step == 4:
-    show_module_instructions(
-        "Module 4: CV Improvement Suggestions", 
-        "Receive actionable suggestions to reframe your CV so it better aligns with the job description. You can also choose to update your CV within this module."
-    )
+    show_module_instructions("Module 4: CV Improvement Suggestions", "Receive actionable suggestions to reframe your CV so it better aligns with the job description. You can also choose to update your CV within this module.")
     st.title("Module 4: CV Improvement Suggestions")
     st.markdown("<div class='module-title'>Get Actionable Suggestions to Reframe Your CV</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
@@ -1126,10 +1120,7 @@ elif st.session_state.step == 4:
             st.rerun()
 
 elif st.session_state.step == 5:
-    show_module_instructions(
-        "Module 5: Interview Questions & Guidance", 
-        "Generate tailored interview questions based on your CV and job description. The questions are grouped into Technical, Behavioral, and CV Related categories to help you prepare comprehensively."
-    )
+    show_module_instructions("Module 5: Interview Questions & Guidance", "Generate tailored interview questions based on your CV and job description. The questions are grouped into Technical, Behavioral, and CV Related categories to help you prepare comprehensively.")
     st.title("Module 5: Interview Questions & Guidance")
     st.markdown("<div class='module-title'>Generate Interview Questions Based on Your CV & JD</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
@@ -1155,15 +1146,11 @@ elif st.session_state.step == 5:
             st.rerun()
 
 elif st.session_state.step == 6:
-    show_module_instructions(
-        "Module 6: Practice Interview", 
-        "Practice your interview skills by answering generated or custom questions. Receive real-time feedback on your responses to help you improve."
-    )
+    show_module_instructions("Module 6: Practice Interview", "Practice your interview skills by answering generated or custom questions. Receive real-time feedback on your responses to help you improve.")
     st.title("Module 6: Practice Interview")
     st.markdown("<div class='module-title'>Practice Your Interview Skills</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
     st.write("---")
-    # Regenerate Interview Questions button with warning (counts as a Module 5 run)
     if st.button("Regenerate Interview Questions", key="regen_questions6"):
         st.warning("Warning: Regenerating interview questions will count as a run of Module 5.")
         if st.session_state.cv_text and st.session_state.jd_text:
@@ -1186,11 +1173,7 @@ elif st.session_state.step == 6:
         st.warning("No interview questions found. Please generate questions first.")
     custom_question = st.text_input("Or enter a custom question to practice (optional):", key="custom_question")
     if custom_question.strip():
-        selected_question_obj = {
-            "question": custom_question.strip(),
-            "guidelines": "N/A",
-            "fit_score": "N/A"
-        }
+        selected_question_obj = {"question": custom_question.strip(), "guidelines": "N/A", "fit_score": "N/A"}
     if selected_question_obj:
         summary, details = selected_question_obj.get("question"), selected_question_obj.get("guidelines")
         st.markdown(f"**Question:** {summary}")
@@ -1266,9 +1249,10 @@ elif st.session_state.step == 6:
             st.rerun()
     with col3:
         if st.button("Start Over", key="restart_practice"):
-            for key in list(st.session_state.keys()):
-                if key not in ["user", "auth_page", "customer_email", "page"]:
-                    st.session_state.pop(key)
+            keys_to_clear = ["cv_text", "cv_analysis", "jd_text", "jd_analysis", "fit_analysis", "cv_improvement", "interview_output", "parsed_questions", "step"]
+            for key in keys_to_clear:
+                if key in st.session_state:
+                    del st.session_state[key]
             st.session_state.step = 0
             st.session_state.page = "landing"
             st.rerun()
