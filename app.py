@@ -197,7 +197,6 @@ def login_user(email, password):
             user_record = auth.get_user_by_email(email)
             if not user_record.email_verified:
                 st.error("Please verify your email before logging in.")
-                # Store token for resend purposes
                 st.session_state.unverified_id_token = data["idToken"]
                 return None
         except Exception as e:
@@ -233,6 +232,16 @@ def send_verification_email(idToken):
     api_key = firebase_config.get("API_KEY")
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key={api_key}"
     payload = {"requestType": "VERIFY_EMAIL", "idToken": idToken}
+    response = requests.post(url, json=payload)
+    if response.status_code == 200:
+        return True, response.json()
+    else:
+        return False, response.json()
+
+def reset_password(email):
+    api_key = firebase_config.get("API_KEY")
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key={api_key}"
+    payload = {"requestType": "PASSWORD_RESET", "email": email}
     response = requests.post(url, json=payload)
     if response.status_code == 200:
         return True, response.json()
@@ -705,7 +714,7 @@ if st.session_state.get("user") is None:
                         del st.session_state.unverified_id_token
                     st.success("Logged in successfully!")
                     st.rerun()
-            # If unverified, show resend button
+            # Show Resend Verification and Forgot Password options
             if "unverified_id_token" in st.session_state:
                 if st.button("Resend Verification Email", key="resend_verification"):
                     success, result = send_verification_email(st.session_state.unverified_id_token)
@@ -713,6 +722,15 @@ if st.session_state.get("user") is None:
                         st.success("Verification email sent!")
                     else:
                         st.error("Failed to send verification email: " + str(result))
+            if st.button("Forgot Password?"):
+                if email:
+                    success, result = reset_password(email)
+                    if success:
+                        st.success("Password reset email sent!")
+                    else:
+                        st.error("Failed to send password reset email: " + str(result))
+                else:
+                    st.error("Please enter your email to reset your password.")
             st.markdown("Don't have an account?")
             if st.button("Go to Sign Up"):
                 st.session_state.auth_page = "signup"
