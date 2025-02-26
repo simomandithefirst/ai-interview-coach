@@ -24,6 +24,7 @@ import stripe
 # Import Cookie Manager (install streamlit-cookies-manager)
 # ------------------------------------------------------
 from streamlit_cookies_manager import EncryptedCookieManager
+
 # ------------------------------------------------------
 # Define word limits for inputs
 # ------------------------------------------------------
@@ -563,7 +564,7 @@ def render_card(content: str):
     st.markdown(f"<div class='card'>{html_content}</div>", unsafe_allow_html=True)
 
 def clean_markdown_output(text: str) -> str:
-    return text.replace("```markdown", "").replace("```", "")
+    return text.replace("markdown", "").replace("", "")
 
 def format_question(q_obj: dict):
     summary = q_obj.get("question", "").strip()
@@ -774,7 +775,7 @@ def buy_package_button(label, price_id, purchase_plan):
         user_data = get_user_data()
         current_plan = user_data.get("subscription", {}).get("package", "free")
         if st.button(f"Buy {label}", key=f"buy_{purchase_plan}"):
-            if current_plan=='ultimate':
+            if current_plan=='ultimate' and purchase_plan == 'pro':
                 st.warning("Buying the Pro package will downgrade your current Ultimate Package.")
             checkout_url = create_checkout_session(price_id, st.session_state.customer_email, purchase_plan)
             if checkout_url:
@@ -823,6 +824,9 @@ if "show_upgrade" not in st.session_state:
 if st.session_state.get("user") is None:
     if st.session_state.get("auth_page", "login") == "login":
         def login_page():
+            # Added app name and slogan on login page
+            st.markdown("<h1 style='text-align: center;'>Career Catalyst</h1>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center;'>Empowering Your Career Journey</p>", unsafe_allow_html=True)
             st.title("Login")
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_password")
@@ -1407,7 +1411,7 @@ Based on the above, provide your evaluation and suggestions for improvement. You
 if not, start with '<span style="color: red;">FAIL</span>' then Your response should have these:
 
 - Analysis of audio response and suggestions of improvement : this must be short and concise.
-- Analysis of content, evaluation and suggestions of improvement: this must be not be too long and should be well structured.
+- Analysis of content, evaluation and suggestions for improvement: this must be not be too long and should be well structured.
 
 Respond in {st.session_state.language}."""
                                 
@@ -1468,5 +1472,4 @@ Respond in {st.session_state.language}."""
             st.session_state.step = 0
             st.session_state.page = "landing"
             st.rerun()
-
 
