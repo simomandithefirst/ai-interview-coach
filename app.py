@@ -7,22 +7,118 @@ import PyPDF2
 import io
 import markdown as md  # alias for markdown
 from datetime import datetime, timedelta
+import tempfile
+import base64
+import concurrent.futures
+
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, auth, db
 import stripe
-import tempfile
-import base64
+# ------------------------------------------------------
+# Import Cookie Manager (install streamlit-cookies-manager)
+# ------------------------------------------------------
+from streamlit_cookies_manager import EncryptedCookieManager
 
-# -------------------------------
+st.set_page_config(page_title="Career Catalyst", layout="wide")
+
+
+# Set up the cookies manager with a prefix and secret password.
+# (In production, use a secure and randomized password.)
+cookies = EncryptedCookieManager(prefix="career_catalyst", password="super_secret_key")
+if not cookies.ready():
+    st.stop()
+
+# ------------------------------------------------------
+# Rate Limiting & URL Validation Utilities
+# ------------------------------------------------------
+def check_rate_limit():
+    """
+    Simple per‑session daily rate limit: allow a maximum of 150 API calls.
+    (In production, use a robust backend mechanism such as Redis or cloud functions.)
+    """
+    today = datetime.now().date()
+    if "api_calls_date" not in st.session_state or st.session_state.api_calls_date != today:
+        st.session_state.api_calls_date = today
+        st.session_state.api_calls_count = 0
+    if st.session_state.api_calls_count >= 150:
+        raise Exception("API rate limit exceeded for today (150 calls limit).")
+    st.session_state.api_calls_count += 1
+
+def validate_app_url(url):
+    """
+    Validate APP_URL against a strict allowlist to avoid open redirects.
+    Adjust ALLOWED_APP_URLS as needed.
+    """
+    ALLOWED_APP_URLS = ["http://localhost:8501", "https://mycareercatalyst.com"]
+    for allowed in ALLOWED_APP_URLS:
+        if url.startswith(allowed):
+            return url
+    raise ValueError("APP_URL is not in the allowed list.")
+
+# ------------------------------------------------------
+# Chat Completion Functions with Rate Limiting & Fallback
+# ------------------------------------------------------
+def deepseek_completion(**kwargs):
+    if not st.secrets.get("DEEP_SEEK_API"):
+        st.error("DEEP_SEEK_API key not found in secrets.toml.")
+        return None
+    deepseek_client = OpenAI(api_key=st.secrets.DEEP_SEEK_API, base_url="https://api.deepseek.com")
+    kwargs["model"] = "deepseek-chat"
+    try:
+        check_rate_limit()
+        response = deepseek_client.chat.completions.create(**kwargs)
+        return response
+    except Exception as e:
+        st.error(f"DeepSeek API call error: {e}")
+        return None
+
+def chat_completion(**kwargs):
+    try:
+        check_rate_limit()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(client.chat.completions.create, **kwargs)
+            response = future.result(timeout=30)
+            return response
+    except concurrent.futures.TimeoutError:
+        st.warning("GPT-4o timed out. Falling back to DeepSeek API.")
+        return deepseek_completion(**kwargs)
+    except Exception as e:
+        st.error(f"Chat completion error: {e}")
+        return None
+
+def chat_completion_function_call(**kwargs):
+    """
+    For function calling, only use OpenAI. Wait up to 5 minutes (300 seconds).
+    If the call times out, output an error, do not count the run, and advise to try again later.
+    """
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(client.chat.completions.create, **kwargs)
+            response = future.result(timeout=300)  # 5 minutes timeout
+        check_rate_limit()
+        return response
+    except concurrent.futures.TimeoutError:
+        st.error("Function calling timed out after 5 minutes. Please try again later.")
+        return None
+    except Exception as e:
+        st.error(f"Error during function calling: {e}")
+        return None
+
+# ------------------------------------------------------
 # Load configuration from st.secrets
-# -------------------------------
+# ------------------------------------------------------
 config = st.secrets
 APP_URL = config.get("APP_URL", "http://localhost:8501/")
+try:
+    APP_URL = validate_app_url(APP_URL)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
 
-# -------------------------------
+# ------------------------------------------------------
 # Load API Keys & Credentials from st.secrets
-# -------------------------------
+# ------------------------------------------------------
 openai_api_key = config.get("OPENAI_API_KEY")
 app_users_json = config.get("APP_USERS")
 if not openai_api_key:
@@ -37,9 +133,9 @@ if not STRIPE_API_KEY or not PRO_PRICE_ID or not ULTIMATE_PRICE_ID:
     st.error("Stripe credentials are missing in st.secrets.")
     st.stop()
 
-# -------------------------------
+# ------------------------------------------------------
 # Helper: Reset usage for all modules
-# -------------------------------
+# ------------------------------------------------------
 def reset_usage():
     return {
         "Module 1": 0,
@@ -50,55 +146,49 @@ def reset_usage():
         "Module 6": 0,
     }
 
-# -------------------------------
+# ------------------------------------------------------
 # Helper: Update subscription using Stripe session data
-# -------------------------------
+# ------------------------------------------------------
 SIX_MONTHS = timedelta(days=180)
 def update_tier_by_checkout_session(session_id):
+    """
+    Retrieve the Stripe Checkout Session and update the corresponding Firebase user record.
+    This function looks directly at the Stripe API (e.g. payment_status must be 'paid') and updates Firebase.
+    """
     try:
         session = stripe.checkout.Session.retrieve(session_id)
         purchase_plan = session.metadata.get("purchase_plan", "free")
         customer_email = session.customer_email
+
+        # Ensure that payment was successful.
+        if getattr(session, "payment_status", None) != "paid":
+            st.error("Payment was not completed successfully.")
+            return False, None, customer_email
+
         # Look up the user in Firebase by matching the email.
         users_ref = db.reference("users")
         users = users_ref.get() or {}
         for uid, user in users.items():
             if user.get("email", "").lower() == customer_email.lower():
-                current_plan = user.get("subscription", {}).get("package", "free")
-                if purchase_plan == "pro" and current_plan == "ultimate":
-                    st.warning("You are currently on the Ultimate plan. Switching to the Pro package will cause you to lose access to Ultimate advantages.")
-                    if st.button("Confirm Downgrade", key="confirm_downgrade_checkout"):
-                        expiry_date = datetime.now() + SIX_MONTHS
-                        usage_init = reset_usage()
-                        users_ref.child(uid).update({
-                            "subscription": {
-                                "package": purchase_plan,
-                                "expiry": expiry_date.isoformat()
-                            },
-                            "usage": usage_init
-                        })
-                        return True, purchase_plan, customer_email
-                    else:
-                        return False, None, customer_email
-                else:
-                    expiry_date = datetime.now() + SIX_MONTHS
-                    usage_init = reset_usage()
-                    users_ref.child(uid).update({
-                        "subscription": {
-                            "package": purchase_plan,
-                            "expiry": expiry_date.isoformat()
-                        },
-                        "usage": usage_init
-                    })
-                    return True, purchase_plan, customer_email
+                expiry_date = datetime.now() + SIX_MONTHS
+                usage_init = reset_usage()
+                users_ref.child(uid).update({
+                    "subscription": {
+                        "package": purchase_plan,
+                        "expiry": expiry_date.isoformat()
+                    },
+                    "usage": usage_init
+                })
+                return True, purchase_plan, customer_email
+        st.error("User not found in database.")
         return False, None, customer_email
     except Exception as e:
         st.error(f"Error updating subscription via checkout session: {e}")
         return False, None, None
 
-# -------------------------------
+# ------------------------------------------------------
 # Check Query Parameters for Payment Status using st.query_params
-# -------------------------------
+# ------------------------------------------------------
 if "status" in st.query_params:
     status = st.query_params["status"]
     if status == "success":
@@ -110,7 +200,7 @@ if "status" in st.query_params:
                 st.success(f"Subscription upgraded to {plan.capitalize()} for {customer_email}! All usage counters have been reset.")
             else:
                 st.info("Payment completed. Please log in with the same email to see your upgraded subscription.")
-        st.query_params.clear()  # Clear query parameters from the URL
+        st.query_params.clear()
         st.rerun()
     elif status == "cancel":
         st.warning("Payment failed or was cancelled.")
@@ -119,9 +209,9 @@ if "status" in st.query_params:
         st.query_params.clear()
         st.rerun()
 
-# -------------------------------
+# ------------------------------------------------------
 # Define checkout session creation function (with metadata)
-# -------------------------------
+# ------------------------------------------------------
 stripe.api_key = STRIPE_API_KEY
 def create_checkout_session(price_id, customer_email, purchase_plan):
     try:
@@ -139,9 +229,9 @@ def create_checkout_session(price_id, customer_email, purchase_plan):
         st.error(f"Error creating checkout session: {e}")
         return None
 
-# -------------------------------
+# ------------------------------------------------------
 # Firebase Client Configuration
-# -------------------------------
+# ------------------------------------------------------
 firebase_config = config.get("FIREBASE", {})
 firebase_client_config = {
     "apiKey": firebase_config.get("API_KEY"),
@@ -156,9 +246,9 @@ if not firebase_client_config.get("apiKey"):
     st.error("Firebase configuration is missing in st.secrets.")
     st.stop()
 
-# -------------------------------
+# ------------------------------------------------------
 # Firebase Admin SDK Initialization
-# -------------------------------
+# ------------------------------------------------------
 firebase_admin_creds = config.get("FIREBASE_ADMIN_CREDENTIALS")
 if not firebase_admin_creds:
     st.error("FIREBASE_ADMIN_CREDENTIALS not set in st.secrets.")
@@ -179,9 +269,9 @@ try:
 except ValueError:
     firebase_admin.initialize_app(admin_cred, {"databaseURL": firebase_client_config.get("databaseURL")})
 
-# -------------------------------
+# ------------------------------------------------------
 # Firebase Auth Functions (using REST API & Admin SDK)
-# -------------------------------
+# ------------------------------------------------------
 FIREBASE_REST_API = "https://identitytoolkit.googleapis.com/v1"
 
 def login_user(email, password):
@@ -192,9 +282,7 @@ def login_user(email, password):
     if response.status_code == 200:
         data = response.json()
         try:
-            # Verify token
             auth.verify_id_token(data["idToken"])
-            # Fetch user record and check email verification status
             user_record = auth.get_user_by_email(email)
             if not user_record.email_verified:
                 st.error("Please verify your email before logging in.")
@@ -250,12 +338,16 @@ def reset_password(email):
         return False, response.json()
 
 def logout_user():
+    # Clear both session state and cookies.
     st.session_state.clear()
-    st.rerun()
+    cookies["user"] = ""
+    cookies["login_time"] = ""
+    cookies.save()
+    #st.rerun()
 
-# -------------------------------
+# ------------------------------------------------------
 # Store New User Info in Realtime Database
-# -------------------------------
+# ------------------------------------------------------
 def store_user_in_db(user, email):
     ref = db.reference("users")
     usage_init = reset_usage()
@@ -267,9 +359,9 @@ def store_user_in_db(user, email):
          "subscription": subscription_init
     })
 
-# -------------------------------
+# ------------------------------------------------------
 # Firebase Admin Helper Functions for Usage & Subscription
-# -------------------------------
+# ------------------------------------------------------
 def get_user_data():
     user = st.session_state.get("user")
     if not user:
@@ -331,9 +423,9 @@ def update_tier_after_payment(plan):
     })
     st.success(f"Successfully upgraded to {plan.capitalize()}! All module usage has been reset and access is valid until {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# -------------------------------
+# ------------------------------------------------------
 # Utility Functions (PDF extraction, scraping, etc.)
-# -------------------------------
+# ------------------------------------------------------
 def extract_text_from_pdf(file) -> str:
     try:
         file.seek(0)
@@ -454,87 +546,9 @@ def update_or_keep_cv_jd():
     else:
         pass
 
-# -------------------------------
-# Helper: Generate Interview Questions
-# -------------------------------
-def generate_interview_questions(cv_text, jd_text):
-    with st.spinner("Generating interview questions..."):
-        try:
-            prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
-            messages = [{"role": "user", "content": prompt}]
-            functions = [{
-                "name": "get_interview_questions",
-                "description": (
-                    "Return interview questions grouped by category in a JSON object. "
-                    "Each category's value is a list of question objects with keys 'question', 'guidelines', and 'fit_score'."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "Technical": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "question": {"type": "string"},
-                                    "guidelines": {"type": "string"},
-                                    "fit_score": {"type": "number"}
-                                },
-                                "required": ["question", "guidelines", "fit_score"]
-                            }
-                        },
-                        "Behavioral": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "question": {"type": "string"},
-                                    "guidelines": {"type": "string"},
-                                    "fit_score": {"type": "number"}
-                                },
-                                "required": ["question", "guidelines", "fit_score"]
-                            }
-                        },
-                        "CV Related": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "question": {"type": "string"},
-                                    "guidelines": {"type": "string"},
-                                    "fit_score": {"type": "number"}
-                                },
-                                "required": ["question", "guidelines", "fit_score"]
-                            }
-                        }
-                    },
-                    "required": ["Technical", "Behavioral", "CV Related"]
-                }
-            }]
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                functions=functions,
-                function_call="auto",
-                temperature=0.7,
-                max_tokens=3000
-            )
-            message = response.choices[0].message
-            if hasattr(message, "function_call") and message.function_call:
-                arguments = message.function_call.arguments
-            else:
-                arguments = message.content
-            arguments_clean = arguments.replace("\n", "\\n")
-            parsed = json.loads(arguments_clean)
-            st.session_state.parsed_questions = parsed
-            st.session_state.interview_output = json.dumps(parsed, indent=2)
-            st.success("Interview questions generated successfully!")
-        except Exception as e:
-            st.error(f"Error generating interview questions: {e}")
-
-# -------------------------------
+# ------------------------------------------------------
 # Prompt Templates
-# -------------------------------
+# ------------------------------------------------------
 CV_ANALYSIS_PROMPT = """Analyze the following CV and provide insightful observations that go beyond simply listing its content. 
 Focus on identifying unique strengths and areas for improvement that the candidate may not have realized.
 
@@ -620,31 +634,46 @@ Answer: {answer}
 
 Respond in {language}."""
 
-# -------------------------------
+# ------------------------------------------------------
 # Initialize OpenAI Client
-# -------------------------------
+# ------------------------------------------------------
 client = OpenAI(api_key=openai_api_key)
 
-# -------------------------------
+# ------------------------------------------------------
+# Cookie-based Login Persistence
+# ------------------------------------------------------
+# On each page load, if there is a valid cookie with user info (and login_time is less than 24 hours old),
+# restore st.session_state.user and st.session_state.customer_email.
+if "user" not in st.session_state or st.session_state.user is None:
+    if "user" in cookies and cookies.get("user"):
+        try:
+            login_time = float(cookies.get("login_time", "0"))
+            if datetime.now().timestamp() - login_time < 24*3600:
+                st.session_state.user = json.loads(cookies.get("user"))
+                st.session_state.customer_email = st.session_state.user.get("email")
+            else:
+                # Expired cookie; clear it.
+                cookies["user"] = ""
+                cookies["login_time"] = ""
+                cookies.save()
+        except Exception as e:
+            st.error("Error reading cookie: " + str(e))
+            cookies["user"] = ""
+            cookies["login_time"] = ""
+            cookies.save()
+
+# ------------------------------------------------------
 # Helper Functions for Upgrade and Module Instructions
-# -------------------------------
+# ------------------------------------------------------
 def buy_package_button(label, price_id, purchase_plan):
     if st.session_state.customer_email:
         user_data = get_user_data()
         current_plan = user_data.get("subscription", {}).get("package", "free")
-        if purchase_plan == "pro" and current_plan == "ultimate":
-            st.warning("You are currently on the Ultimate plan. Switching to the Pro package will cause you to lose access to Ultimate advantages.")
-            if st.button(f"Confirm Downgrade to {label}", key=f"confirm_{purchase_plan}"):
-                checkout_url = create_checkout_session(price_id, st.session_state.customer_email, purchase_plan)
-                if checkout_url:
-                    st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
-                    st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
-        else:
-            if st.button(f"Buy {label}", key=f"buy_{purchase_plan}"):
-                checkout_url = create_checkout_session(price_id, st.session_state.customer_email, purchase_plan)
-                if checkout_url:
-                    st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
-                    st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
+        if st.button(f"Buy {label}", key=f"buy_{purchase_plan}"):
+            checkout_url = create_checkout_session(price_id, st.session_state.customer_email, purchase_plan)
+            if checkout_url:
+                st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
+                st.markdown(f"[Click here if not redirected automatically]({checkout_url})", unsafe_allow_html=True)
     else:
         st.error("Please enter your email for upgrade.")
 
@@ -653,15 +682,13 @@ def show_module_instructions(module_title, instructions):
         st.markdown(f"#### {module_title}")
         st.markdown(instructions)
 
-# -------------------------------
+# ------------------------------------------------------
 # Global CSS and Page Configuration with Background Image
-# -------------------------------
-st.set_page_config(page_title="Career Catalyst", layout="wide")
+# ------------------------------------------------------
 
-
-# -------------------------------
+# ------------------------------------------------------
 # Session State Initialization for Main App
-# -------------------------------
+# ------------------------------------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
 if "customer_email" not in st.session_state:
@@ -684,9 +711,9 @@ if "language" not in st.session_state: st.session_state.language = "English"
 if "show_upgrade" not in st.session_state:
     st.session_state.show_upgrade = False
 
-# -------------------------------
+# ------------------------------------------------------
 # Ensure user is logged in before proceeding
-# -------------------------------
+# ------------------------------------------------------
 if st.session_state.get("user") is None:
     if st.session_state.get("auth_page", "login") == "login":
         def login_page():
@@ -698,11 +725,12 @@ if st.session_state.get("user") is None:
                 if user:
                     st.session_state.user = user
                     st.session_state.customer_email = email
-                    if "unverified_id_token" in st.session_state:
-                        del st.session_state.unverified_id_token
+                    # Save login info in cookies (expires in 24h)
+                    cookies["user"] = json.dumps(user)
+                    cookies["login_time"] = str(datetime.now().timestamp())
+                    cookies.save()
                     st.success("Logged in successfully!")
                     st.rerun()
-            # Show Resend Verification and Forgot Password options
             if "unverified_id_token" in st.session_state:
                 if st.button("Resend Verification Email", key="resend_verification"):
                     success, result = send_verification_email(st.session_state.unverified_id_token)
@@ -742,9 +770,9 @@ if st.session_state.get("user") is None:
         signup_page()
         st.stop()
 
-# -------------------------------
+# ------------------------------------------------------
 # Sidebar Navigation with Logout, Settings, and Start Button
-# -------------------------------
+# ------------------------------------------------------
 with st.sidebar:
     st.markdown("<h1 style='text-align: center;'>Career Catalyst</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; font-size: 12px;'>Empowering Your Career Journey</p>", unsafe_allow_html=True)
@@ -783,9 +811,9 @@ with st.sidebar:
         st.session_state.page = "about"
         st.rerun()
 
-# -------------------------------
+# ------------------------------------------------------
 # Legal Mentions Page
-# -------------------------------
+# ------------------------------------------------------
 if st.session_state.page == "legal":
     st.title("Legal Mentions")
     st.markdown("""
@@ -798,9 +826,9 @@ This service is provided by Career Catalyst and is subject to French law. All in
          st.rerun()
     st.stop()
 
-# -------------------------------
+# ------------------------------------------------------
 # Contact Us Page
-# -------------------------------
+# ------------------------------------------------------
 if st.session_state.page == "contact":
     st.title("Contact Us")
     st.markdown("For any inquiries or support, please email: [careercatalysthelpdesk@gmail.com](mailto:careercatalysthelpdesk@gmail.com)")
@@ -809,9 +837,9 @@ if st.session_state.page == "contact":
          st.rerun()
     st.stop()
 
-# -------------------------------
+# ------------------------------------------------------
 # About Us Page
-# -------------------------------
+# ------------------------------------------------------
 if st.session_state.page == "about":
     st.title("About Us")
     st.markdown("""
@@ -831,9 +859,9 @@ For more information or support, please contact us at [careercatalysthelpdesk@gm
          st.rerun()
     st.stop()
 
-# -------------------------------
+# ------------------------------------------------------
 # Settings Page with Upgrade Options
-# -------------------------------
+# ------------------------------------------------------
 if st.session_state.page == "settings":
     st.title("Settings")
     if st.button("← Back to Landing"):
@@ -879,9 +907,9 @@ if st.session_state.page == "settings":
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
-# -------------------------------
+# ------------------------------------------------------
 # Landing Page
-# -------------------------------
+# ------------------------------------------------------
 if st.session_state.page == "landing" and st.session_state.step == 0:
     st.title("Career Catalyst")
     st.markdown("""
@@ -931,9 +959,9 @@ Whether you're applying for a job or preparing for an interview, our tools will 
             buy_package_button("Ultimate Package", ULTIMATE_PRICE_ID, "ultimate")
             st.markdown("</div>", unsafe_allow_html=True)
 
-# -------------------------------
+# ------------------------------------------------------
 # Module Pages (Modules 1-6)
-# -------------------------------
+# ------------------------------------------------------
 if st.session_state.step == 1:
     show_module_instructions("Module 1: CV Analysis", "Upload your CV in PDF format. This module analyzes your CV to identify your unique strengths and areas for improvement. Use the feedback to optimize your resume for your job search.")
     st.title("Module 1: CV Analysis")
@@ -963,7 +991,7 @@ if st.session_state.step == 1:
             with st.spinner("Analyzing your CV..."):
                 try:
                     prompt = CV_ANALYSIS_PROMPT.format(cv_text=st.session_state.cv_text, language=st.session_state.language)
-                    response = client.chat.completions.create(
+                    response = chat_completion(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.7,
@@ -1033,7 +1061,7 @@ elif st.session_state.step == 2:
             with st.spinner("Analyzing job description..."):
                 try:
                     prompt = JD_ANALYSIS_PROMPT.format(jd_text=st.session_state.jd_text, language=st.session_state.language)
-                    response = client.chat.completions.create(
+                    response = chat_completion(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.7,
@@ -1068,7 +1096,7 @@ elif st.session_state.step == 3:
             with st.spinner("Calculating fit analysis..."):
                 try:
                     prompt = FIT_ANALYSIS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
-                    response = client.chat.completions.create(
+                    response = chat_completion(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.7,
@@ -1104,7 +1132,7 @@ elif st.session_state.step == 4:
             with st.spinner("Generating suggestions..."):
                 try:
                     prompt = CV_ENHANCEMENT_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
-                    response = client.chat.completions.create(
+                    response = chat_completion(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.7,
@@ -1137,6 +1165,82 @@ elif st.session_state.step == 5:
     if cv_text and jd_text:
         st.write("---")
         if st.button("Generate Interview Questions", key="gen_int_questions"):
+            def generate_interview_questions(cv_text, jd_text):
+                with st.spinner("Generating interview questions..."):
+                    try:
+                        prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
+                        messages = [{"role": "user", "content": prompt}]
+                        functions = [{
+                            "name": "get_interview_questions",
+                            "description": (
+                                "Return interview questions grouped by category in a JSON object. "
+                                "Each category's value is a list of question objects with keys 'question', 'guidelines', and 'fit_score'."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "Technical": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "question": {"type": "string"},
+                                                "guidelines": {"type": "string"},
+                                                "fit_score": {"type": "number"}
+                                            },
+                                            "required": ["question", "guidelines", "fit_score"]
+                                        }
+                                    },
+                                    "Behavioral": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "question": {"type": "string"},
+                                                "guidelines": {"type": "string"},
+                                                "fit_score": {"type": "number"}
+                                            },
+                                            "required": ["question", "guidelines", "fit_score"]
+                                        }
+                                    },
+                                    "CV Related": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "question": {"type": "string"},
+                                                "guidelines": {"type": "string"},
+                                                "fit_score": {"type": "number"}
+                                            },
+                                            "required": ["question", "guidelines", "fit_score"]
+                                        }
+                                    }
+                                },
+                                "required": ["Technical", "Behavioral", "CV Related"]
+                            }
+                        }]
+                        response = chat_completion_function_call(
+                            model="gpt-4o",
+                            messages=messages,
+                            functions=functions,
+                            function_call="auto",
+                            temperature=0.7,
+                            max_tokens=3000
+                        )
+                        if response is None:
+                            return
+                        message = response.choices[0].message
+                        if hasattr(message, "function_call") and message.function_call:
+                            arguments = message.function_call.arguments
+                        else:
+                            arguments = message.content
+                        arguments_clean = arguments.replace("\n", "\\n")
+                        parsed = json.loads(arguments_clean)
+                        st.session_state.parsed_questions = parsed
+                        st.session_state.interview_output = json.dumps(parsed, indent=2)
+                        st.success("Interview questions generated successfully!")
+                    except Exception as e:
+                        st.error(f"Error generating interview questions: {e}")
             generate_interview_questions(cv_text, jd_text)
         if st.session_state.interview_output:
             st.markdown("### Interview Questions by Category")
@@ -1207,7 +1311,7 @@ elif st.session_state.step == 6:
                                 st.markdown("**Transcribed Answer:**")
                                 st.write(transcript)
                                 feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=transcript, language=st.session_state.language)
-                                feedback_response = client.chat.completions.create(
+                                feedback_response = chat_completion(
                                     model="gpt-4o",
                                     messages=[
                                         {"role": "system", "content": "You are a helpful interview coach."},
@@ -1233,7 +1337,7 @@ elif st.session_state.step == 6:
                     with st.spinner("Generating feedback..."):
                         try:
                             feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=typed_answer, language=st.session_state.language)
-                            feedback_response = client.chat.completions.create(
+                            feedback_response = chat_completion(
                                 model="gpt-4o",
                                 messages=[
                                     {"role": "system", "content": "You are a helpful interview coach."},
