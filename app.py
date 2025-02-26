@@ -11,6 +11,9 @@ import tempfile
 import base64
 import concurrent.futures
 
+import numpy as np
+import librosa
+
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, auth, db
@@ -22,7 +25,13 @@ from streamlit_cookies_manager import EncryptedCookieManager
 
 st.set_page_config(page_title="Career Catalyst", layout="wide")
 
+# ------------------------------------------------------
+# Define word limits for inputs
+# ------------------------------------------------------
+CV_WORD_LIMIT = 5000  # Maximum words allowed for CV (approx 5 pages)
+JD_WORD_LIMIT = 2000  # Maximum words allowed for Job Description
 
+# ------------------------------------------------------
 # Set up the cookies manager with a prefix and secret password.
 # (In production, use a secure and randomized password.)
 cookies = EncryptedCookieManager(prefix="career_catalyst", password="super_secret_key")
@@ -104,6 +113,83 @@ def chat_completion_function_call(**kwargs):
     except Exception as e:
         st.error(f"Error during function calling: {e}")
         return None
+    
+def generate_interview_questions(cv_text, jd_text):
+    with st.spinner("Generating interview questions..."):
+        try:
+            prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
+            messages = [{"role": "user", "content": prompt}]
+            functions = [{
+                "name": "get_interview_questions",
+                "description": (
+                    "Return interview questions grouped by category in a JSON object. "
+                    "Each category's value is a list of question objects with keys 'question', 'guidelines', and 'fit_score'."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "Technical": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "guidelines": {"type": "string"},
+                                    "fit_score": {"type": "number"}
+                                },
+                                "required": ["question", "guidelines", "fit_score"]
+                            }
+                        },
+                        "Behavioral": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "guidelines": {"type": "string"},
+                                    "fit_score": {"type": "number"}
+                                },
+                                "required": ["question", "guidelines", "fit_score"]
+                            }
+                        },
+                        "CV Related": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {"type": "string"},
+                                    "guidelines": {"type": "string"},
+                                    "fit_score": {"type": "number"}
+                                },
+                                "required": ["question", "guidelines", "fit_score"]
+                            }
+                        }
+                    },
+                    "required": ["Technical", "Behavioral", "CV Related"]
+                }
+            }]
+            response = chat_completion_function_call(
+                model="gpt-4o",
+                messages=messages,
+                functions=functions,
+                function_call="auto",
+                temperature=0.7,
+                max_tokens=3000
+            )
+            if response is None:
+                return
+            message = response.choices[0].message
+            if hasattr(message, "function_call") and message.function_call:
+                arguments = message.function_call.arguments
+            else:
+                arguments = message.content
+            arguments_clean = arguments.replace("\n", "\\n")
+            parsed = json.loads(arguments_clean)
+            st.session_state.parsed_questions = parsed
+            st.session_state.interview_output = json.dumps(parsed, indent=2)
+            st.success("Interview questions generated successfully!")
+        except Exception as e:
+            st.error(f"Error generating interview questions: {e}")
 
 # ------------------------------------------------------
 # Load configuration from st.secrets
@@ -343,7 +429,8 @@ def logout_user():
     cookies["user"] = ""
     cookies["login_time"] = ""
     cookies.save()
-    #st.rerun()
+    st.success("You've successfully logged out. Please log in again.")
+    st.rerun()
 
 # ------------------------------------------------------
 # Store New User Info in Realtime Database
@@ -500,8 +587,11 @@ def update_or_keep_cv_jd():
         if new_cv:
             cv_text = extract_text_from_pdf(new_cv)
             if cv_text:
-                st.session_state.cv_text = cv_text
-                st.success("CV updated successfully!")
+                if len(cv_text.split()) > CV_WORD_LIMIT:
+                    st.error("Your CV appears to be too long (over 5 pages). Please upload a CV with fewer words.")
+                else:
+                    st.session_state.cv_text = cv_text
+                    st.success("CV updated successfully!")
     elif choice == "Update JD only":
         st.markdown("**Option A:** Scrape from a URL")
         new_jd_url = st.text_input("Enter new JD URL")
@@ -511,22 +601,31 @@ def update_or_keep_cv_jd():
                 if error:
                     st.error(f"Scraping error: {error}")
                 elif scraped_text:
-                    st.session_state.jd_text = scraped_text
-                    st.success("Job description updated (scraped) successfully!")
+                    if len(scraped_text.split()) > JD_WORD_LIMIT:
+                        st.error("The scraped job description is too long. Please try a different source or manually shorten it.")
+                    else:
+                        st.session_state.jd_text = scraped_text
+                        st.success("Job description updated (scraped) successfully!")
         st.markdown("**Option B:** Paste new JD below")
         new_jd_manual = st.text_area("Paste new Job Description", height=120)
         if new_jd_manual.strip():
-            if st.button("Use This New JD"):
-                st.session_state.jd_text = new_jd_manual.strip()
-                st.success("Job description updated successfully!")
+            if len(new_jd_manual.split()) > JD_WORD_LIMIT:
+                st.error("The job description is too long. Please provide a shorter description (less than 2000 words).")
+            else:
+                if st.button("Use This New JD"):
+                    st.session_state.jd_text = new_jd_manual.strip()
+                    st.success("Job description updated successfully!")
     elif choice == "Update both":
         st.write("### Update CV")
         new_cv = st.file_uploader("Upload your new CV (PDF)", type=["pdf"], key=f"cv_reupload_both_m{st.session_state.get('step', 0)}")
         if new_cv:
             cv_text = extract_text_from_pdf(new_cv)
             if cv_text:
-                st.session_state.cv_text = cv_text
-                st.success("CV updated successfully!")
+                if len(cv_text.split()) > CV_WORD_LIMIT:
+                    st.error("Your CV appears to be too long (over 5 pages). Please upload a CV with fewer words.")
+                else:
+                    st.session_state.cv_text = cv_text
+                    st.success("CV updated successfully!")
         st.write("---")
         st.write("### Update Job Description")
         new_jd_url = st.text_input("Enter new JD URL (optional)")
@@ -536,13 +635,19 @@ def update_or_keep_cv_jd():
                 if error:
                     st.error(f"Scraping error: {error}")
                 elif scraped_text:
-                    st.session_state.jd_text = scraped_text
-                    st.success("Job description updated (scraped) successfully!")
+                    if len(scraped_text.split()) > JD_WORD_LIMIT:
+                        st.error("The scraped job description is too long. Please try a different source or manually shorten it.")
+                    else:
+                        st.session_state.jd_text = scraped_text
+                        st.success("Job description updated (scraped) successfully!")
         new_jd_manual = st.text_area("Paste new Job Description", height=120, key=f"jd_textarea_both_m{st.session_state.get('step', 0)}")
         if new_jd_manual.strip():
-            if st.button("Use This New JD (Both)"):
-                st.session_state.jd_text = new_jd_manual.strip()
-                st.success("Job description updated successfully!")
+            if len(new_jd_manual.split()) > JD_WORD_LIMIT:
+                st.error("The job description is too long. Please provide a shorter description (less than 2000 words).")
+            else:
+                if st.button("Use This New JD (Both)"):
+                    st.session_state.jd_text = new_jd_manual.strip()
+                    st.success("Job description updated successfully!")
     else:
         pass
 
@@ -670,6 +775,8 @@ def buy_package_button(label, price_id, purchase_plan):
         user_data = get_user_data()
         current_plan = user_data.get("subscription", {}).get("package", "free")
         if st.button(f"Buy {label}", key=f"buy_{purchase_plan}"):
+            if current_plan=='ultimate':
+                st.warning("Buying the Pro package will downgrade your current Ultimate Package.")
             checkout_url = create_checkout_session(price_id, st.session_state.customer_email, purchase_plan)
             if checkout_url:
                 st.markdown(f'<script>window.open("{checkout_url}", "_blank");</script>', unsafe_allow_html=True)
@@ -897,6 +1004,7 @@ if st.session_state.page == "settings":
         st.markdown("**Price:** $11.99 (One-time)")
         st.markdown("**Benefit:** 100 runs per module for 6 months")
         buy_package_button("Pro Package", PRO_PRICE_ID, "pro")
+        
         st.markdown("</div>", unsafe_allow_html=True)
     with col2:
         st.markdown("<div class='upgrade-box'>", unsafe_allow_html=True)
@@ -971,8 +1079,11 @@ if st.session_state.step == 1:
         if uploaded_cv is not None:
             cv_text = extract_text_from_pdf(uploaded_cv)
             if cv_text:
-                st.session_state.cv_text = cv_text
-                st.success("CV uploaded successfully!")
+                if len(cv_text.split()) > CV_WORD_LIMIT:
+                    st.error("Your CV appears to be too long (over 5 pages). Please upload a CV with fewer words.")
+                else:
+                    st.session_state.cv_text = cv_text
+                    st.success("CV uploaded successfully!")
         else:
             st.warning("Please upload a valid CV to proceed.")
     else:
@@ -983,8 +1094,11 @@ if st.session_state.step == 1:
             if new_cv is not None:
                 cv_text = extract_text_from_pdf(new_cv)
                 if cv_text:
-                    st.session_state.cv_text = cv_text
-                    st.success("CV replaced successfully!")
+                    if len(cv_text.split()) > CV_WORD_LIMIT:
+                        st.error("The new CV appears to be too long (over 5 pages). Please upload a CV with fewer words.")
+                    else:
+                        st.session_state.cv_text = cv_text
+                        st.success("CV replaced successfully!")
     if st.session_state.cv_text:
         st.markdown("### CV Analysis")
         if st.button("Run CV Analysis", key="run_cv_analysis"):
@@ -1025,15 +1139,21 @@ elif st.session_state.step == 2:
                 if error:
                     st.error(f"Scraping error: {error}")
                 elif scraped_text:
-                    st.session_state.jd_text = scraped_text
-                    st.success("Job description scraped successfully!")
+                    if len(scraped_text.split()) > JD_WORD_LIMIT:
+                        st.error("The scraped job description is too long. Please try a different source or manually shorten it.")
+                    else:
+                        st.session_state.jd_text = scraped_text
+                        st.success("Job description scraped successfully!")
         st.write("---")
         st.markdown("**Option B:** Paste Manually")
         manual_jd = st.text_area("Paste the Job Description here", key="jd_manual_m2", height=200)
         if manual_jd.strip():
-            if st.button("Use This Job Description", key="use_manual_jd_m2"):
-                st.session_state.jd_text = manual_jd.strip()
-                st.success("Job description set successfully!")
+            if len(manual_jd.split()) > JD_WORD_LIMIT:
+                st.error("The job description is too long. Please provide a shorter description (less than 2000 words).")
+            else:
+                if st.button("Use This Job Description", key="use_manual_jd_m2"):
+                    st.session_state.jd_text = manual_jd.strip()
+                    st.success("Job description set successfully!")
     else:
         st.markdown("**Current Job Description:**")
         st.text_area("JD Text (read-only):", value=st.session_state.jd_text, height=180, disabled=True)
@@ -1046,15 +1166,21 @@ elif st.session_state.step == 2:
                     if error:
                         st.error(f"Scraping error: {error}")
                     elif scraped_text:
-                        st.session_state.jd_text = scraped_text
-                        st.success("Job description scraped successfully!")
+                        if len(scraped_text.split()) > JD_WORD_LIMIT:
+                            st.error("The scraped job description is too long. Please try a different source or manually shorten it.")
+                        else:
+                            st.session_state.jd_text = scraped_text
+                            st.success("Job description scraped successfully!")
             st.write("---")
             st.markdown("**Option B:** Paste Manually")
             manual_jd = st.text_area("Paste new Job Description here", key="jd_replace_manual_m2", height=200)
             if manual_jd.strip():
-                if st.button("Use This Job Description", key="use_manual_jd_replace_m2"):
-                    st.session_state.jd_text = manual_jd.strip()
-                    st.success("Job description replaced successfully!")
+                if len(manual_jd.split()) > JD_WORD_LIMIT:
+                    st.error("The job description is too long. Please provide a shorter description (less than 2000 words).")
+                else:
+                    if st.button("Use This Job Description", key="use_manual_jd_replace_m2"):
+                        st.session_state.jd_text = manual_jd.strip()
+                        st.success("Job description replaced successfully!")
     if st.session_state.jd_text:
         st.markdown("### Job Description Analysis")
         if st.button("Run Job Analysis", key="run_jd_analysis"):
@@ -1165,82 +1291,6 @@ elif st.session_state.step == 5:
     if cv_text and jd_text:
         st.write("---")
         if st.button("Generate Interview Questions", key="gen_int_questions"):
-            def generate_interview_questions(cv_text, jd_text):
-                with st.spinner("Generating interview questions..."):
-                    try:
-                        prompt = INTERVIEW_QUESTIONS_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
-                        messages = [{"role": "user", "content": prompt}]
-                        functions = [{
-                            "name": "get_interview_questions",
-                            "description": (
-                                "Return interview questions grouped by category in a JSON object. "
-                                "Each category's value is a list of question objects with keys 'question', 'guidelines', and 'fit_score'."
-                            ),
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "Technical": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "question": {"type": "string"},
-                                                "guidelines": {"type": "string"},
-                                                "fit_score": {"type": "number"}
-                                            },
-                                            "required": ["question", "guidelines", "fit_score"]
-                                        }
-                                    },
-                                    "Behavioral": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "question": {"type": "string"},
-                                                "guidelines": {"type": "string"},
-                                                "fit_score": {"type": "number"}
-                                            },
-                                            "required": ["question", "guidelines", "fit_score"]
-                                        }
-                                    },
-                                    "CV Related": {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "properties": {
-                                                "question": {"type": "string"},
-                                                "guidelines": {"type": "string"},
-                                                "fit_score": {"type": "number"}
-                                            },
-                                            "required": ["question", "guidelines", "fit_score"]
-                                        }
-                                    }
-                                },
-                                "required": ["Technical", "Behavioral", "CV Related"]
-                            }
-                        }]
-                        response = chat_completion_function_call(
-                            model="gpt-4o",
-                            messages=messages,
-                            functions=functions,
-                            function_call="auto",
-                            temperature=0.7,
-                            max_tokens=3000
-                        )
-                        if response is None:
-                            return
-                        message = response.choices[0].message
-                        if hasattr(message, "function_call") and message.function_call:
-                            arguments = message.function_call.arguments
-                        else:
-                            arguments = message.content
-                        arguments_clean = arguments.replace("\n", "\\n")
-                        parsed = json.loads(arguments_clean)
-                        st.session_state.parsed_questions = parsed
-                        st.session_state.interview_output = json.dumps(parsed, indent=2)
-                        st.success("Interview questions generated successfully!")
-                    except Exception as e:
-                        st.error(f"Error generating interview questions: {e}")
             generate_interview_questions(cv_text, jd_text)
         if st.session_state.interview_output:
             st.markdown("### Interview Questions by Category")
@@ -1258,7 +1308,7 @@ elif st.session_state.step == 5:
             st.rerun()
 
 elif st.session_state.step == 6:
-    show_module_instructions("Module 6: Practice Interview", "Practice your interview skills by answering generated or custom questions. Receive real-time feedback on your responses to help you improve.")
+    show_module_instructions("Module 6: Practice Interview", "Practice your interview skills by answering generated or custom questions. Receive real-time feedback on your responses to help you improve. If you record your answer, audio analytics will be performed to assess tone and confidence.")
     st.title("Module 6: Practice Interview")
     st.markdown("<div class='module-title'>Practice Your Interview Skills</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
@@ -1297,8 +1347,9 @@ elif st.session_state.step == 6:
             if audio_value:
                 st.audio(audio_value, format="audio/wav")
                 if st.button("Submit Audio Answer", key="submit_audio"):
-                    with st.spinner("Transcribing and generating feedback..."):
+                    with st.spinner("Processing your audio answer..."):
                         try:
+                            # Transcribe audio
                             audio_bytes = audio_value.read()
                             audio_file = io.BytesIO(audio_bytes)
                             audio_file.name = "recording.wav"
@@ -1310,24 +1361,74 @@ elif st.session_state.step == 6:
                             if transcript and len(transcript.split()) >= 5:
                                 st.markdown("**Transcribed Answer:**")
                                 st.write(transcript)
-                                feedback_prompt = FEEDBACK_PROMPT.format(question=summary, answer=transcript, language=st.session_state.language)
-                                feedback_response = chat_completion(
+                                # Reset pointer to beginning of audio file for analysis
+                                audio_file.seek(0)
+                                # Load audio metrics using librosa
+                                y, sr = librosa.load(audio_file, sr=None)
+                                duration = librosa.get_duration(y=y, sr=sr)
+                                tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+                                tempo = tempo.mean()
+                                spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr)
+                                # Explicitly convert to Python float
+                                avg_centroid = float(spectral_centroids.mean()) if spectral_centroids.size > 0 else 0.0
+                                rms = librosa.feature.rms(y=y)
+                                avg_rms = float(rms.mean()) if rms.size > 0 else 0.0
+
+                                # Display metrics in a better layout using columns
+                                st.markdown("**Audio Metrics:**")
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.metric("Duration", f"{duration:.2f} sec")
+                                    st.metric("Tempo", f"{tempo:.2f} BPM")
+                                with col2:
+                                    st.metric("Avg RMS Energy", f"{avg_rms:.2f}")
+                                    st.metric("Avg Spectral Centroid", f"{avg_centroid:.2f} Hz")
+                                
+                        
+                                # Combined prompt for audio analysis and feedback
+                                combined_feedback_prompt = f"""You are a helpful interview coach. Below is an interview question, the candidate's transcribed answer, and audio analysis metrics. Provide a comprehensive evaluation of the candidate's answer in terms of content, tone, delivery, and confidence. Also, interpret the audio metrics systematically using these rules:
+- Duration: if the answer duration is short for the question asked, note "short answer"; otherwise give either "adequate length" or "long answer" depending on question and answer.
+- Tempo: analyse and tag to very slow pace or normal pace or fast pace based on questions and context
+- Average RMS Energy: analyse and tag low energy or moderate energy or high energy based on question and context.
+- Average Spectral Centroid: analyse and tag muffled or less clarity or clear delivery based on qurestion and context.
+
+In terms of content evaluate interview answer using the appropriate framework (accuracy/soundness, STAR, etc.), depending on type of question, use correct framework to evaluate answer.
+
+Interview Question: {summary}
+
+Candidate's Answer (Transcript): {transcript}
+
+Audio Metrics:
+- Duration: {duration:.2f} seconds
+- Tempo: {tempo:.2f} BPM
+- Average RMS Energy: {avg_rms:.2f}
+- Average Spectral Centroid: {avg_centroid:.2f} Hz
+
+Based on the above, provide your evaluation and suggestions for improvement. Your response must begin with a clear pass/fail indicator using HTML: if the answer is good, start with '<span style="color: green;">PASS</span>'; 
+if not, start with '<span style="color: red;">FAIL</span>' then Your response should have these:
+
+- Analysis of audio response and suggestions of improvement : this must be short and concise.
+- Analysis of content, evaluation and suggestions of improvement: this must be not be too long and should be well structured.
+
+Respond in {st.session_state.language}."""
+                                
+                                combined_response = chat_completion(
                                     model="gpt-4o",
                                     messages=[
                                         {"role": "system", "content": "You are a helpful interview coach."},
-                                        {"role": "user", "content": feedback_prompt}
+                                        {"role": "user", "content": combined_feedback_prompt}
                                     ],
                                     temperature=0.7,
                                     max_tokens=2000
                                 )
-                                feedback = feedback_response.choices[0].message.content
-                                st.markdown("**Feedback on Your Answer:**")
-                                st.markdown(feedback, unsafe_allow_html=True)
+                                combined_feedback = combined_response.choices[0].message.content.strip()
+                                st.markdown("**Evaluation and Feedback:**")
+                                st.markdown(combined_feedback, unsafe_allow_html=True)
                                 record_module_run("Module 6")
                             else:
                                 st.error("Your transcribed answer is too short to evaluate.")
                         except Exception as e:
-                            st.error(f"Error during transcription/feedback: {e}")
+                            st.error(f"Error during audio processing: {e}")
         else:
             typed_answer = st.text_area("Type your answer here:", key="typed_answer")
             if st.button("Submit Typed Answer", key="submit_answer_typed"):
@@ -1346,7 +1447,7 @@ elif st.session_state.step == 6:
                                 temperature=0.7,
                                 max_tokens=500
                             )
-                            feedback = feedback_response.choices[0].message.content
+                            feedback = feedback_response.choices[0].message.content.strip()
                             st.markdown("**Feedback on Your Answer:**")
                             st.markdown(feedback, unsafe_allow_html=True)
                             record_module_run("Module 6")
@@ -1368,3 +1469,5 @@ elif st.session_state.step == 6:
             st.session_state.step = 0
             st.session_state.page = "landing"
             st.rerun()
+
+
