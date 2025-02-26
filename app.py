@@ -1,4 +1,6 @@
 import streamlit as st
+st.set_page_config(page_title="Career Catalyst", layout="wide")
+
 import os
 import json
 import requests
@@ -22,9 +24,6 @@ import stripe
 # Import Cookie Manager (install streamlit-cookies-manager)
 # ------------------------------------------------------
 from streamlit_cookies_manager import EncryptedCookieManager
-
-st.set_page_config(page_title="Career Catalyst", layout="wide")
-
 # ------------------------------------------------------
 # Define word limits for inputs
 # ------------------------------------------------------
