@@ -10,4 +10,5 @@ pytesseract
 pdf2image
 stripe
 streamlit-cookies-manager
+librosa
 
