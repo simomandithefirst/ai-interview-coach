@@ -196,12 +196,6 @@ def generate_interview_questions(cv_text, jd_text):
 # ------------------------------------------------------
 config = st.secrets
 APP_URL = config.get("APP_URL", "http://localhost:8501/")
-try:
-    APP_URL = validate_app_url(APP_URL)
-except Exception as e:
-    st.error(str(e))
-    st.stop()
-
 # ------------------------------------------------------
 # Load API Keys & Credentials from st.secrets
 # ------------------------------------------------------
