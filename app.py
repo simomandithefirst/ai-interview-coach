@@ -183,8 +183,7 @@ def generate_interview_questions(cv_text, jd_text):
                 arguments = message.function_call.arguments
             else:
                 arguments = message.content
-            arguments_clean = arguments.replace("\n", "\\n")
-            parsed = json.loads(arguments_clean)
+            parsed = json.loads(arguments)
             st.session_state.parsed_questions = parsed
             st.session_state.interview_output = json.dumps(parsed, indent=2)
             st.success("Interview questions generated successfully!")
@@ -1265,7 +1264,7 @@ elif st.session_state.step == 4:
     if cv_text and jd_text:
         st.write("---")
         if st.button("Generate CV Improvement Suggestions", key="run_cvimp"):
-            with st.spinner("Generating suggestions ..."):
+            with st.spinner("Generating suggestions using function calling..."):
                 try:
                     prompt = CV_ENHANCEMENT_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
                     messages = [{"role": "user", "content": prompt}]
@@ -1291,8 +1290,7 @@ elif st.session_state.step == 4:
                                         "required": ["old_phrase", "new_phrase", "rationale"]
                                     }
                                 }
-                            },
-                            "required": ["changes"]
+                            }
                         }
                     }]
                     response = chat_completion_function_call(
@@ -1304,17 +1302,16 @@ elif st.session_state.step == 4:
                         max_tokens=1000
                     )
                     if response is None:
-                        st.error("No response. Try again later.")
+                        st.error("No response from function call.")
                     else:
                         message = response.choices[0].message
                         if hasattr(message, "function_call") and message.function_call:
                             arguments = message.function_call.arguments
                         else:
                             arguments = message.content
-                        # Clean newlines and parse JSON
-                        arguments_clean = arguments.replace("\n", "\\n")
-                        parsed = json.loads(arguments_clean)
-                        st.session_state.cv_improvement = parsed  # Expected format: {"changes": [ {old_phrase, new_phrase, rationale}, ... ]}
+
+                        parsed = json.loads(arguments)
+                        st.session_state.cv_improvement = parsed
                         record_module_run("Module 4")
                         st.success("CV Improvement Suggestions generated successfully!")
                 except Exception as e:
@@ -1339,13 +1336,11 @@ elif st.session_state.step == 4:
 
         st.session_state.accepted_changes = accepted_changes
 
-
     # --- Navigation to Next Module ---
     if st.session_state.get("cv_improvement"):
         if st.button("Next: Interview Prep", key="go_module_5"):
             st.session_state.step = 5
             st.rerun()
-
 
 elif st.session_state.step == 5:
     show_module_instructions("Module 5: Interview Questions & Guidance", "Generate tailored interview questions based on your CV and job description. The questions are grouped into Technical, Behavioral, and CV Related categories to help you prepare comprehensively.")
@@ -1450,7 +1445,6 @@ elif st.session_state.step == 6:
                                     st.metric("Avg RMS Energy", f"{avg_rms:.2f}")
                                     st.metric("Avg Spectral Centroid", f"{avg_centroid:.2f} Hz")
                                 
-                        
                                 # Combined prompt for audio analysis and feedback
                                 combined_feedback_prompt = f"""You are a helpful interview coach. Below is an interview question, the candidate's transcribed answer, and audio analysis metrics. Provide a comprehensive evaluation of the candidate's answer in terms of content, tone, delivery, and confidence. Also, interpret the audio metrics systematically using these rules:
 - Duration: if the answer duration is short for the question asked, note "short answer"; otherwise give either "adequate length" or "long answer" depending on question and answer.
@@ -1535,4 +1529,5 @@ Respond in {st.session_state.language}."""
             st.session_state.step = 0
             st.session_state.page = "landing"
             st.rerun()
+
 
