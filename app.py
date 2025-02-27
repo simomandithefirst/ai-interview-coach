@@ -623,7 +623,7 @@ def update_or_keep_cv_jd():
         st.write("---")
         st.write("### Update Job Description")
         new_jd_url = st.text_input("Enter new JD URL (optional)")
-        if new_jd_url and st.button("Scrape New JD (Both)"):
+        if new_jd_url and st.button("Scrape New JD "):
             with st.spinner("Scraping job posting..."):
                 scraped_text, error = scrape_job_description(new_jd_url)
                 if error:
@@ -639,7 +639,7 @@ def update_or_keep_cv_jd():
             if len(new_jd_manual.split()) > JD_WORD_LIMIT:
                 st.error("The job description is too long. Please provide a shorter description (less than 2000 words).")
             else:
-                if st.button("Use This New JD (Both)"):
+                if st.button("Use This New JD "):
                     st.session_state.jd_text = new_jd_manual.strip()
                     st.success("Job description updated successfully!")
     else:
