@@ -20,10 +20,15 @@ from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, auth, db
 import stripe
+from dotenv import load_dotenv
+
 # ------------------------------------------------------
 # Import Cookie Manager (install streamlit-cookies-manager)
 # ------------------------------------------------------
 from streamlit_cookies_manager import EncryptedCookieManager
+
+# Load environment variables from the .env file
+load_dotenv()
 
 # ------------------------------------------------------
 # Define word limits for inputs
@@ -42,10 +47,6 @@ if not cookies.ready():
 # Rate Limiting & URL Validation Utilities
 # ------------------------------------------------------
 def check_rate_limit():
-    """
-    Simple per‑session daily rate limit: allow a maximum of 150 API calls.
-    (In production, use a robust backend mechanism such as Redis or cloud functions.)
-    """
     today = datetime.now().date()
     if "api_calls_date" not in st.session_state or st.session_state.api_calls_date != today:
         st.session_state.api_calls_date = today
@@ -55,10 +56,6 @@ def check_rate_limit():
     st.session_state.api_calls_count += 1
 
 def validate_app_url(url):
-    """
-    Validate APP_URL against a strict allowlist to avoid open redirects.
-    Adjust ALLOWED_APP_URLS as needed.
-    """
     ALLOWED_APP_URLS = ["http://localhost:8501", "https://mycareercatalyst.com"]
     for allowed in ALLOWED_APP_URLS:
         if url.startswith(allowed):
@@ -69,10 +66,10 @@ def validate_app_url(url):
 # Chat Completion Functions with Rate Limiting & Fallback
 # ------------------------------------------------------
 def deepseek_completion(**kwargs):
-    if not st.secrets.get("DEEP_SEEK_API"):
-        st.error("DEEP_SEEK_API key not found in secrets.toml.")
+    if not os.getenv("DEEP_SEEK_API"):
+        st.error("DEEP_SEEK_API key not found in environment variables.")
         return None
-    deepseek_client = OpenAI(api_key=st.secrets.DEEP_SEEK_API, base_url="https://api.deepseek.com/v1")
+    deepseek_client = OpenAI(api_key=os.getenv("DEEP_SEEK_API"), base_url="https://api.deepseek.com/v1")
     kwargs["model"] = "deepseek-chat"
     try:
         check_rate_limit()
@@ -97,10 +94,6 @@ def chat_completion(**kwargs):
         return None
 
 def chat_completion_function_call(**kwargs):
-    """
-    For function calling, only use OpenAI. Wait up to 5 minutes (300 seconds).
-    If the call times out, output an error, do not count the run, and advise to try again later.
-    """
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(client.chat.completions.create, **kwargs)
@@ -191,26 +184,22 @@ def generate_interview_questions(cv_text, jd_text):
             st.error(f"Error generating interview questions: {e}")
 
 # ------------------------------------------------------
-# Load configuration from st.secrets
+# Load configuration from environment variables
 # ------------------------------------------------------
-config = st.secrets
-APP_URL = config.get("APP_URL")
+APP_URL = os.getenv("APP_URL")
 
-# ------------------------------------------------------
-# Load API Keys & Credentials from st.secrets
-# ------------------------------------------------------
-openai_api_key = config.get("OPENAI_API_KEY")
-app_users_json = config.get("APP_USERS")
-if not openai_api_key:
-    st.error("OPENAI_API_KEY not found in st.secrets.")
-    st.stop()
+openai_api_key = os.getenv("OPENAI_API_KEY")
+app_users_json = os.getenv("APP_USERS")  # if used
 
 # Stripe Credentials
-STRIPE_API_KEY = config.get("STRIPE_API_KEY")
-PRO_PRICE_ID = config.get("PRO_PRICE_ID")
-ULTIMATE_PRICE_ID = config.get("ULTIMATE_PRICE_ID")
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
+PRO_PRICE_ID = os.getenv("PRO_PRICE_ID")
+ULTIMATE_PRICE_ID = os.getenv("ULTIMATE_PRICE_ID")
+if not openai_api_key:
+    st.error("OPENAI_API_KEY not found in environment variables.")
+    st.stop()
 if not STRIPE_API_KEY or not PRO_PRICE_ID or not ULTIMATE_PRICE_ID:
-    st.error("Stripe credentials are missing in st.secrets.")
+    st.error("Stripe credentials are missing in environment variables.")
     st.stop()
 
 # ------------------------------------------------------
@@ -231,21 +220,15 @@ def reset_usage():
 # ------------------------------------------------------
 SIX_MONTHS = timedelta(days=180)
 def update_tier_by_checkout_session(session_id):
-    """
-    Retrieve the Stripe Checkout Session and update the corresponding Firebase user record.
-    This function looks directly at the Stripe API (e.g. payment_status must be 'paid') and updates Firebase.
-    """
     try:
         session = stripe.checkout.Session.retrieve(session_id)
         purchase_plan = session.metadata.get("purchase_plan", "free")
         customer_email = session.customer_email
 
-        # Ensure that payment was successful.
         if getattr(session, "payment_status", None) != "paid":
             st.error("Payment was not completed successfully.")
             return False, None, customer_email
 
-        # Look up the user in Firebase by matching the email.
         users_ref = db.reference("users")
         users = users_ref.get() or {}
         for uid, user in users.items():
@@ -312,30 +295,37 @@ def create_checkout_session(price_id, customer_email, purchase_plan):
 # ------------------------------------------------------
 # Firebase Client Configuration
 # ------------------------------------------------------
-firebase_config = config.get("FIREBASE", {})
-firebase_client_config = {
-    "apiKey": firebase_config.get("API_KEY"),
-    "authDomain": firebase_config.get("AUTH_DOMAIN"),
-    "databaseURL": firebase_config.get("DATABASE_URL"),
-    "projectId": firebase_config.get("PROJECT_ID"),
-    "storageBucket": firebase_config.get("STORAGE_BUCKET"),
-    "messagingSenderId": firebase_config.get("MESSAGING_SENDER_ID"),
-    "appId": firebase_config.get("APP_ID")
+firebase_config = {
+    "apiKey": os.getenv("FIREBASE_API_KEY"),
+    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN"),
+    "databaseURL": os.getenv("FIREBASE_DATABASE_URL"),
+    "projectId": os.getenv("FIREBASE_PROJECT_ID"),
+    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
+    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID"),
+    "appId": os.getenv("FIREBASE_APP_ID")
 }
-if not firebase_client_config.get("apiKey"):
-    st.error("Firebase configuration is missing in st.secrets.")
+if not firebase_config.get("apiKey"):
+    st.error("Firebase configuration is missing in environment variables.")
     st.stop()
 
 # ------------------------------------------------------
 # Firebase Admin SDK Initialization
 # ------------------------------------------------------
-firebase_admin_creds = config.get("FIREBASE_ADMIN_CREDENTIALS")
-if not firebase_admin_creds:
-    st.error("FIREBASE_ADMIN_CREDENTIALS not set in st.secrets.")
+# Load the Firebase Admin key from the FIREBASE_KEY env variable
+firebase_admin_key = os.getenv("FIREBASE_KEY")
+if not firebase_admin_key:
+    st.error("FIREBASE_KEY not found in environment variables.")
     st.stop()
-firebase_admin_creds = dict(firebase_admin_creds)
-if "\\n" in firebase_admin_creds.get("private_key", ""):
-    firebase_admin_creds["private_key"] = firebase_admin_creds["private_key"].replace("\\n", "\n")
+
+try:
+    firebase_admin_creds = json.loads(firebase_admin_key)
+    # If the private key contains literal "\n", convert them to actual newlines.
+    if "private_key" in firebase_admin_creds:
+        firebase_admin_creds["private_key"] = firebase_admin_creds["private_key"].replace("\\n", "\n")
+except Exception as e:
+    st.error(f"Error loading Firebase Admin key: {e}")
+    st.stop()
+
 try:
     with tempfile.NamedTemporaryFile(delete=False, mode="w", suffix=".json") as temp_file:
         json.dump(firebase_admin_creds, temp_file)
@@ -347,7 +337,7 @@ admin_cred = credentials.Certificate(firebase_admin_creds)
 try:
     firebase_admin.get_app()
 except ValueError:
-    firebase_admin.initialize_app(admin_cred, {"databaseURL": firebase_client_config.get("databaseURL")})
+    firebase_admin.initialize_app(admin_cred, {"databaseURL": firebase_config.get("databaseURL")})
 
 # ------------------------------------------------------
 # Firebase Auth Functions (using REST API & Admin SDK)
@@ -355,7 +345,7 @@ except ValueError:
 FIREBASE_REST_API = "https://identitytoolkit.googleapis.com/v1"
 
 def login_user(email, password):
-    api_key = firebase_config.get("API_KEY")
+    api_key = firebase_config.get("apiKey")
     url = f"{FIREBASE_REST_API}/accounts:signInWithPassword?key={api_key}"
     payload = {"email": email, "password": password, "returnSecureToken": True}
     response = requests.post(url, json=payload)
@@ -378,7 +368,7 @@ def login_user(email, password):
         return None
 
 def signup_user(email, password):
-    api_key = firebase_config.get("API_KEY")
+    api_key = firebase_config.get("apiKey")
     url = f"{FIREBASE_REST_API}/accounts:signUp?key={api_key}"
     payload = {"email": email, "password": password, "returnSecureToken": True}
     response = requests.post(url, json=payload)
@@ -398,7 +388,7 @@ def signup_user(email, password):
         return None
 
 def send_verification_email(idToken):
-    api_key = firebase_config.get("API_KEY")
+    api_key = firebase_config.get("apiKey")
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key={api_key}"
     payload = {"requestType": "VERIFY_EMAIL", "idToken": idToken}
     response = requests.post(url, json=payload)
@@ -408,7 +398,7 @@ def send_verification_email(idToken):
         return False, response.json()
 
 def reset_password(email):
-    api_key = firebase_config.get("API_KEY")
+    api_key = firebase_config.get("apiKey")
     url = f"https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key={api_key}"
     payload = {"requestType": "PASSWORD_RESET", "email": email}
     response = requests.post(url, json=payload)
@@ -418,7 +408,6 @@ def reset_password(email):
         return False, response.json()
 
 def logout_user():
-    # Clear both session state and cookies.
     st.session_state.clear()
     cookies["user"] = ""
     cookies["login_time"] = ""
@@ -741,8 +730,6 @@ client = OpenAI(api_key=openai_api_key)
 # ------------------------------------------------------
 # Cookie-based Login Persistence
 # ------------------------------------------------------
-# On each page load, if there is a valid cookie with user info (and login_time is less than 24 hours old),
-# restore st.session_state.user and st.session_state.customer_email.
 if "user" not in st.session_state or st.session_state.user is None:
     if "user" in cookies and cookies.get("user"):
         try:
@@ -751,7 +738,6 @@ if "user" not in st.session_state or st.session_state.user is None:
                 st.session_state.user = json.loads(cookies.get("user"))
                 st.session_state.customer_email = st.session_state.user.get("email")
             else:
-                # Expired cookie; clear it.
                 cookies["user"] = ""
                 cookies["login_time"] = ""
                 cookies.save()
@@ -769,7 +755,7 @@ def buy_package_button(label, price_id, purchase_plan):
         user_data = get_user_data()
         current_plan = user_data.get("subscription", {}).get("package", "free")
         if st.button(f"Buy {label}", key=f"buy_{purchase_plan}"):
-            if current_plan=='ultimate' and purchase_plan == 'pro':
+            if current_plan == 'ultimate' and purchase_plan == 'pro':
                 st.warning("Buying the Pro package will downgrade your current Ultimate Package.")
             checkout_url = create_checkout_session(price_id, st.session_state.customer_email, purchase_plan)
             if checkout_url:
@@ -786,6 +772,7 @@ def show_module_instructions(module_title, instructions):
 # ------------------------------------------------------
 # Global CSS and Page Configuration with Background Image
 # ------------------------------------------------------
+# (Assume any CSS/background code remains unchanged)
 
 # ------------------------------------------------------
 # Session State Initialization for Main App
@@ -797,7 +784,7 @@ if "customer_email" not in st.session_state:
 if "auth_page" not in st.session_state:
     st.session_state.auth_page = "login"
 if "step" not in st.session_state:
-    st.session_state.step = 0  # 0 = landing, 1..6 = modules
+    st.session_state.step = 0
 if "page" not in st.session_state:
     st.session_state.page = "landing"
 if "cv_text" not in st.session_state: st.session_state.cv_text = None
@@ -818,7 +805,6 @@ if "show_upgrade" not in st.session_state:
 if st.session_state.get("user") is None:
     if st.session_state.get("auth_page", "login") == "login":
         def login_page():
-            # Added app name and slogan on login page
             st.markdown("<h1 style='text-align: center;'>Career Catalyst</h1>", unsafe_allow_html=True)
             st.markdown("<p style='text-align: center;'>Empowering Your Career Journey</p>", unsafe_allow_html=True)
             st.title("Login")
@@ -829,7 +815,6 @@ if st.session_state.get("user") is None:
                 if user:
                     st.session_state.user = user
                     st.session_state.customer_email = email
-                    # Save login info in cookies (expires in 24h)
                     cookies["user"] = json.dumps(user)
                     cookies["login_time"] = str(datetime.now().timestamp())
                     cookies.save()
@@ -914,6 +899,10 @@ with st.sidebar:
     if st.button("About Us", key="about_us"):
         st.session_state.page = "about"
         st.rerun()
+
+# ------------------------------------------------------
+# (Remaining pages – Legal, Contact, About, Settings, Landing, and Modules 1–6 – remain unchanged.)
+# ------------------------------------------------------
 
 # ------------------------------------------------------
 # Legal Mentions Page
