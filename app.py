@@ -72,7 +72,7 @@ def deepseek_completion(**kwargs):
     if not st.secrets.get("DEEP_SEEK_API"):
         st.error("DEEP_SEEK_API key not found in secrets.toml.")
         return None
-    deepseek_client = OpenAI(api_key=st.secrets.DEEP_SEEK_API, base_url="https://api.deepseek.com")
+    deepseek_client = OpenAI(api_key=st.secrets.DEEP_SEEK_API, base_url="https://api.deepseek.com/v1")
     kwargs["model"] = "deepseek-chat"
     try:
         check_rate_limit()
@@ -196,6 +196,12 @@ def generate_interview_questions(cv_text, jd_text):
 # ------------------------------------------------------
 config = st.secrets
 APP_URL = config.get("APP_URL", "http://localhost:8501/")
+try:
+    APP_URL = validate_app_url(APP_URL)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
+
 # ------------------------------------------------------
 # Load API Keys & Credentials from st.secrets
 # ------------------------------------------------------
@@ -1243,40 +1249,108 @@ elif st.session_state.step == 3:
             st.rerun()
 
 elif st.session_state.step == 4:
-    show_module_instructions("Module 4: CV Improvement Suggestions", "Receive actionable suggestions to reframe your CV so it better aligns with the job description. You can also choose to update your CV within this module.")
+    # ------------------------------------------------------
+    # Module 4: CV Improvement Suggestions (Table Display & Template-based PDF Generation)
+    # ------------------------------------------------------
+    show_module_instructions(
+        "Module 4: CV Improvement Suggestions",
+        "Receive actionable suggestions to reframe your CV so it better aligns with the job description. "
+        "The proposed changes below were generated using function calling and are displayed in a table with four columns: "
+        "Old Phrase, New Phrase, Rationale, and an Acceptance checkbox. All changes are initially accepted. "
+        "Once you review them, click 'Generate PDF with Accepted Changes' to produce a modified CV PDF (using a template-based generator) "
+        "that applies only the accepted changes."
+    )
     st.title("Module 4: CV Improvement Suggestions")
     st.markdown("<div class='module-title'>Get Actionable Suggestions to Reframe Your CV</div>", unsafe_allow_html=True)
     update_or_keep_cv_jd()
     cv_text = st.session_state.cv_text
     jd_text = st.session_state.jd_text
+
+    # --- Step 1: Generate Suggestions via Function Calling ---
     if cv_text and jd_text:
         st.write("---")
         if st.button("Generate CV Improvement Suggestions", key="run_cvimp"):
-            with st.spinner("Generating suggestions..."):
+            with st.spinner("Generating suggestions ..."):
                 try:
                     prompt = CV_ENHANCEMENT_PROMPT.format(cv_text=cv_text, jd_text=jd_text, language=st.session_state.language)
-                    response = chat_completion(
+                    messages = [{"role": "user", "content": prompt}]
+                    functions = [{
+                        "name": "get_cv_improvement_suggestions",
+                        "description": (
+                            "Return proposed changes for CV improvement suggestions based on the provided CV and job description. "
+                            "The output should be a JSON object with a key 'changes', which is an array of change objects. "
+                            "Each change object must have keys 'old_phrase', 'new_phrase', and 'rationale'."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "changes": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "old_phrase": {"type": "string"},
+                                            "new_phrase": {"type": "string"},
+                                            "rationale": {"type": "string"}
+                                        },
+                                        "required": ["old_phrase", "new_phrase", "rationale"]
+                                    }
+                                }
+                            },
+                            "required": ["changes"]
+                        }
+                    }]
+                    response = chat_completion_function_call(
                         model="gpt-4o",
-                        messages=[{"role": "user", "content": prompt}],
+                        messages=messages,
+                        functions=functions,
+                        function_call="auto",
                         temperature=0.7,
                         max_tokens=1000
                     )
-                    result = response.choices[0].message.content.strip()
-                    if result and len(result) > 20:
-                        st.session_state.cv_improvement = result
-                        record_module_run("Module 4")
+                    if response is None:
+                        st.error("No response. Try again later.")
                     else:
-                        st.error("CV Improvement Suggestions returned an unexpected result.")
+                        message = response.choices[0].message
+                        if hasattr(message, "function_call") and message.function_call:
+                            arguments = message.function_call.arguments
+                        else:
+                            arguments = message.content
+                        # Clean newlines and parse JSON
+                        arguments_clean = arguments.replace("\n", "\\n")
+                        parsed = json.loads(arguments_clean)
+                        st.session_state.cv_improvement = parsed  # Expected format: {"changes": [ {old_phrase, new_phrase, rationale}, ... ]}
+                        record_module_run("Module 4")
+                        st.success("CV Improvement Suggestions generated successfully!")
                 except Exception as e:
                     st.error(f"Error generating suggestions: {e}")
     else:
         st.warning("Please ensure both CV and JD are provided before generating suggestions.")
-    if st.session_state.cv_improvement:
-        st.markdown("### CV Improvement Suggestions")
-        render_card(st.session_state.cv_improvement)
+
+    # --- Step 2: Display Proposed Changes in a Table ---
+    if st.session_state.get("cv_improvement") and "changes" in st.session_state.cv_improvement:
+        st.markdown("### Proposed CV Improvements")
+        # Create table headers using columns
+        cols = st.columns([3, 3, 4])
+        cols[0].markdown("**Old Phrase**")
+        cols[1].markdown("**New Phrase**")
+        cols[2].markdown("**Rationale**")
+        accepted_changes = []
+        for i, change in enumerate(st.session_state.cv_improvement["changes"]):
+            col_old, col_new, col_rat = st.columns([3, 3, 4])
+            col_old.write(change["old_phrase"])
+            col_new.write(change["new_phrase"])
+            col_rat.write(change["rationale"])
+
+        st.session_state.accepted_changes = accepted_changes
+
+
+    # --- Navigation to Next Module ---
+    if st.session_state.get("cv_improvement"):
         if st.button("Next: Interview Prep", key="go_module_5"):
             st.session_state.step = 5
             st.rerun()
+
 
 elif st.session_state.step == 5:
     show_module_instructions("Module 5: Interview Questions & Guidance", "Generate tailored interview questions based on your CV and job description. The questions are grouped into Technical, Behavioral, and CV Related categories to help you prepare comprehensively.")
